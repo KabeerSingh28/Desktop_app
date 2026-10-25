@@ -2,10 +2,14 @@
   "name": "athena_phase_1",
   "private": true,
   "version": "0.0.0",
+  "type": "module",
   "main": "./electron/main.cjs",
   "scripts": {
     "start": "electron .",
+    "start:prod": "vite build && electron . --prod",
     "dev": "vite",
+    "dev:electron": "electron .",
+    "dev:react": "vite",
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview"

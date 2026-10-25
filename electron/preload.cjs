@@ -7,5 +7,5 @@ contextBridge.exposeInMainWorld('electronAPI',{
     create : (value) => ipcRenderer.send('create-event',value),
     setFullScreen : () => ipcRenderer.send('set-fullScreen'),
     getData : (value) => ipcRenderer.invoke('get-data',value),
-    showExamRules : () => ipcRenderer.send('show-exam-rules')
+    showExamRules : () => ipcRenderer.invoke('show-exam-rules')
 })

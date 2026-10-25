@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   isImageCaptureSupported,
+  isMediaRecorderSupported,
+  getSupportedVideoMimeType,
   isStreamLive,
   captureFrame,
 } from './cameraUtils.js';
@@ -181,4 +183,42 @@ describe('Camera & ImageCapture Utilities', () => {
       ).rejects.toThrow('Frame capture failed');
     });
   });
+
+  describe('isMediaRecorderSupported', () => {
+    it('returns true when window.MediaRecorder is a function', () => {
+      global.window = { MediaRecorder: function () {} };
+      expect(isMediaRecorderSupported()).toBe(true);
+    });
+
+    it('returns false when window.MediaRecorder is undefined', () => {
+      global.window = {};
+      expect(isMediaRecorderSupported()).toBe(false);
+    });
+  });
+
+  describe('getSupportedVideoMimeType', () => {
+    it('returns null when MediaRecorder is unsupported', () => {
+      global.window = {};
+      expect(getSupportedVideoMimeType()).toBeNull();
+    });
+
+    it('returns the first matching supported mime type', () => {
+      global.window = {
+        MediaRecorder: {
+          isTypeSupported: (type) => type === 'video/webm;codecs=vp8,opus',
+        },
+      };
+      expect(getSupportedVideoMimeType()).toBe('video/webm;codecs=vp8,opus');
+    });
+
+    it('returns null when no candidate mime types are supported', () => {
+      global.window = {
+        MediaRecorder: {
+          isTypeSupported: () => false,
+        },
+      };
+      expect(getSupportedVideoMimeType()).toBeNull();
+    });
+  });
 });
+

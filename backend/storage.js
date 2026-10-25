@@ -152,6 +152,8 @@ export function sanitizeSession(session) {
         selectedAnswer: ans.selectedAnswer,
         answeredAt: ans.answeredAt,
       })),
+      events: session.events || [],
+      snapshots: session.snapshots || [],
     };
   }
 
@@ -167,5 +169,7 @@ export function sanitizeSession(session) {
     correct: session.correct,
     wrong: session.wrong,
     answers: session.answers,
+    events: session.events || [],
+    snapshots: session.snapshots || [],
   };
 }

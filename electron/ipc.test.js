@@ -18,9 +18,13 @@ import path from 'node:path';
 import {
   validateString,
   validateSnapshotPayload,
+  validateVideoChunkPayload,
+  sanitizePathSegment,
   validateCandidatePayload,
   validateSessionIdPayload,
   validateKioskPayload,
+  validateProctorEventPayload,
+  EventDeduplicator,
   isAllowedNavigationUrl,
   isRestrictedExamShortcut,
   CHANNELS,
@@ -181,6 +185,99 @@ describe('validateSnapshotPayload', () => {
       validateSnapshotPayload({ sessionId: 'sess-1', dataUrl: huge }),
     ).toThrow('exceeds maximum length');
   });
+
+  it('accepts optional trigger and timestamp', () => {
+    expect(() =>
+      validateSnapshotPayload({
+        sessionId: 'sess-1',
+        dataUrl: validDataUrl,
+        trigger: 'session:start',
+        timestamp: new Date().toISOString(),
+      }),
+    ).not.toThrow();
+  });
+
+  it('rejects trigger exceeding 32 chars', () => {
+    expect(() =>
+      validateSnapshotPayload({
+        sessionId: 'sess-1',
+        dataUrl: validDataUrl,
+        trigger: 'a'.repeat(33),
+      }),
+    ).toThrow(/trigger exceeds maximum length/);
+  });
+
+  it('rejects non-string/number timestamp', () => {
+    expect(() =>
+      validateSnapshotPayload({
+        sessionId: 'sess-1',
+        dataUrl: validDataUrl,
+        timestamp: { date: 'now' },
+      }),
+    ).toThrow(/timestamp must be a string or number/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// sanitizePathSegment
+// ---------------------------------------------------------------------------
+describe('sanitizePathSegment', () => {
+  it('preserves clean alphanumeric names and underscores/hyphens', () => {
+    expect(sanitizePathSegment('session-123_abc')).toBe('session-123_abc');
+  });
+
+  it('strips directory traversal components like ../ and ..\\', () => {
+    expect(sanitizePathSegment('../../../etc/passwd')).toBe('etcpasswd');
+    expect(sanitizePathSegment('..\\..\\windows\\system32')).toBe('windowssystem32');
+  });
+
+  it('strips null bytes and whitespace', () => {
+    expect(sanitizePathSegment('file\0name')).toBe('filename');
+    expect(sanitizePathSegment('  clean-name  ')).toBe('clean-name');
+  });
+
+  it('falls back to "unknown" for empty or non-string inputs', () => {
+    expect(sanitizePathSegment('')).toBe('unknown');
+    expect(sanitizePathSegment(null)).toBe('unknown');
+    expect(sanitizePathSegment(undefined)).toBe('unknown');
+    expect(sanitizePathSegment(123)).toBe('unknown');
+    expect(sanitizePathSegment('/..//')).toBe('unknown');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateVideoChunkPayload
+// ---------------------------------------------------------------------------
+describe('validateVideoChunkPayload', () => {
+  it('accepts valid base64 chunk string', () => {
+    expect(() =>
+      validateVideoChunkPayload({
+        sessionId: 'sess-1',
+        chunk: 'GkXfo59ChoEBQveBAULygQ8=',
+        mimeType: 'video/webm',
+      })
+    ).not.toThrow();
+  });
+
+  it('accepts Uint8Array chunk buffer', () => {
+    expect(() =>
+      validateVideoChunkPayload({
+        sessionId: 'sess-1',
+        chunk: new Uint8Array([1, 2, 3, 4]),
+      })
+    ).not.toThrow();
+  });
+
+  it('throws when payload is null or non-object', () => {
+    expect(() => validateVideoChunkPayload(null)).toThrow(TypeError);
+    expect(() => validateVideoChunkPayload('bad')).toThrow(TypeError);
+  });
+
+  it('throws when chunk is missing or invalid type', () => {
+    expect(() =>
+      validateVideoChunkPayload({ sessionId: 'sess-1' })
+    ).toThrow(/chunk must be a base64 string or binary buffer/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -276,6 +373,125 @@ describe('isRestrictedExamShortcut', () => {
 });
 
 // ---------------------------------------------------------------------------
+// validateProctorEventPayload
+// ---------------------------------------------------------------------------
+describe('validateProctorEventPayload', () => {
+  it('passes for a valid proctoring event payload', () => {
+    expect(() =>
+      validateProctorEventPayload({
+        eventType: 'window:blur',
+        severity: 'warning',
+        source: 'main-process',
+        metadata: { note: 'Lost focus' },
+      })
+    ).not.toThrow();
+  });
+
+  it('throws when payload is null or non-object', () => {
+    expect(() => validateProctorEventPayload(null)).toThrow(TypeError);
+    expect(() => validateProctorEventPayload([])).toThrow(TypeError);
+    expect(() => validateProctorEventPayload('event')).toThrow(TypeError);
+  });
+
+  it('throws for unknown eventType', () => {
+    expect(() =>
+      validateProctorEventPayload({
+        eventType: 'keyboard:cheating',
+        severity: 'critical',
+      })
+    ).toThrow(/Invalid eventType/);
+  });
+
+  it('throws for invalid severity', () => {
+    expect(() =>
+      validateProctorEventPayload({
+        eventType: 'fullscreen:exit',
+        severity: 'fatal',
+      })
+    ).toThrow(/Invalid severity/);
+  });
+
+  it('throws for invalid source', () => {
+    expect(() =>
+      validateProctorEventPayload({
+        eventType: 'fullscreen:exit',
+        severity: 'warning',
+        source: 'unknown-agent',
+      })
+    ).toThrow(/Invalid source/);
+  });
+
+  it('throws when metadata is not a plain object', () => {
+    expect(() =>
+      validateProctorEventPayload({
+        eventType: 'fullscreen:exit',
+        severity: 'warning',
+        metadata: 'bad-metadata',
+      })
+    ).toThrow(/metadata must be a plain object/);
+    expect(() =>
+      validateProctorEventPayload({
+        eventType: 'fullscreen:exit',
+        severity: 'warning',
+        metadata: ['array'],
+      })
+    ).toThrow(/metadata must be a plain object/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// EventDeduplicator
+// ---------------------------------------------------------------------------
+describe('EventDeduplicator', () => {
+  it('records initial stateful transition', () => {
+    const dedup = new EventDeduplicator({ debounceMs: 400 });
+    const shouldRec = dedup.shouldRecord({ eventType: 'window:blur', timestamp: 1000 });
+    expect(shouldRec).toBe(true);
+  });
+
+  it('suppresses duplicate consecutive events in the same state', () => {
+    const dedup = new EventDeduplicator({ debounceMs: 400 });
+    expect(dedup.shouldRecord({ eventType: 'window:blur', timestamp: 1000 })).toBe(true);
+    // Duplicate consecutive blur event should be suppressed regardless of time
+    expect(dedup.shouldRecord({ eventType: 'window:blur', timestamp: 2000 })).toBe(false);
+  });
+
+  it('allows paired alternating transitions outside debounce window', () => {
+    const dedup = new EventDeduplicator({ debounceMs: 400 });
+    expect(dedup.shouldRecord({ eventType: 'window:blur', timestamp: 1000 })).toBe(true);
+    expect(dedup.shouldRecord({ eventType: 'window:focus', timestamp: 1500 })).toBe(true);
+    expect(dedup.shouldRecord({ eventType: 'window:blur', timestamp: 2000 })).toBe(true);
+  });
+
+  it('filters rapid paired oscillation within debounce window', () => {
+    const dedup = new EventDeduplicator({ debounceMs: 400 });
+    expect(dedup.shouldRecord({ eventType: 'fullscreen:exit', timestamp: 1000 })).toBe(true);
+    // Returning to enter state, but within 100ms
+    expect(dedup.shouldRecord({ eventType: 'fullscreen:enter', timestamp: 1100 })).toBe(true);
+    // Rapid exit again within 200ms of last exit
+    expect(dedup.shouldRecord({ eventType: 'fullscreen:exit', timestamp: 1200 })).toBe(false);
+  });
+
+  it('throttles discrete events like navigation:blocked within debounce window', () => {
+    const dedup = new EventDeduplicator({ debounceMs: 400 });
+    expect(dedup.shouldRecord({ eventType: 'navigation:blocked', timestamp: 1000 })).toBe(true);
+    // Rapid repeated block within 200ms
+    expect(dedup.shouldRecord({ eventType: 'navigation:blocked', timestamp: 1200 })).toBe(false);
+    // Outside 400ms debounce
+    expect(dedup.shouldRecord({ eventType: 'navigation:blocked', timestamp: 1500 })).toBe(true);
+  });
+
+  it('resets tracking state completely on reset()', () => {
+    const dedup = new EventDeduplicator({ debounceMs: 400 });
+    expect(dedup.shouldRecord({ eventType: 'camera:terminated', timestamp: 1000 })).toBe(true);
+    expect(dedup.shouldRecord({ eventType: 'camera:terminated', timestamp: 2000 })).toBe(false);
+
+    dedup.reset();
+    expect(dedup.shouldRecord({ eventType: 'camera:terminated', timestamp: 2100 })).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // CHANNELS registry – guard against naming typos between preload and main
 // ---------------------------------------------------------------------------
 describe('CHANNELS registry', () => {
@@ -293,6 +509,12 @@ describe('CHANNELS registry', () => {
     'athena:exam:submit-session',
     'athena:exam:cancel-session',
     'athena:evidence:save-snapshot',
+    'athena:evidence:save-video-chunk',
+    'athena:evidence:get-status',
+    'athena:evidence:cleanup',
+    'athena:proctor:record-event',
+    'athena:proctor:get-events',
+    'athena:proctor:event-recorded',
   ];
 
   it('exports all expected channel names', () => {
@@ -308,3 +530,4 @@ describe('CHANNELS registry', () => {
     }
   });
 });
+

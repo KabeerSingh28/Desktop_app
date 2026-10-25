@@ -95,3 +95,49 @@ export function isStreamLive(stream) {
   const tracks = stream.getVideoTracks();
   return tracks.length > 0 && tracks.some((t) => t.readyState === 'live');
 }
+
+/**
+ * Checks whether the MediaRecorder API is supported in the current environment.
+ *
+ * @returns {boolean}
+ */
+export function isMediaRecorderSupported() {
+  return (
+    typeof window !== 'undefined' &&
+    (typeof window.MediaRecorder === 'function' || typeof window.MediaRecorder === 'object') &&
+    window.MediaRecorder !== null
+  );
+}
+
+/**
+ * Returns the best supported video container/codec MIME type for MediaRecorder,
+ * prioritizing VP9/VP8 in WebM, then MP4, or null if unsupported.
+ *
+ * @returns {string | null}
+ */
+export function getSupportedVideoMimeType() {
+  if (!isMediaRecorderSupported()) return null;
+
+  const candidateTypes = [
+    'video/webm;codecs=vp9,opus',
+    'video/webm;codecs=vp8,opus',
+    'video/webm',
+    'video/mp4;codecs=avc1,mp4a.40.2',
+    'video/mp4',
+  ];
+
+  for (const type of candidateTypes) {
+    try {
+      if (
+        typeof window.MediaRecorder.isTypeSupported === 'function' &&
+        window.MediaRecorder.isTypeSupported(type)
+      ) {
+        return type;
+      }
+    } catch {
+      // Ignore evaluation errors in testing mocks or older browser engines
+    }
+  }
+
+  return null;
+}

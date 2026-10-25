@@ -235,8 +235,8 @@ contextBridge.exposeInMainWorld('athena', {
   /**
    * Saves one webcam snapshot for the current exam session.
    * Max payload: 512 KB (base64-encoded JPEG at 60% quality, 640×480).
-   * @param {{ sessionId: string, dataUrl: string }} payload
-   * @returns {Promise<{ ok: boolean }>}
+   * @param {{ sessionId: string, dataUrl: string, trigger?: string, timestamp?: string | number }} payload
+   * @returns {Promise<{ ok: boolean, data?: { filename: string }, error?: string }>}
    */
   saveSnapshot: (payload) => {
     if (!payload || typeof payload !== 'object') {
@@ -245,6 +245,9 @@ contextBridge.exposeInMainWorld('athena', {
     try {
       assertString(payload.sessionId, 'sessionId', 64);
       assertString(payload.dataUrl, 'dataUrl', 512 * 1024); // 512 KB hard cap
+      if (payload.trigger) {
+        assertString(payload.trigger, 'trigger', 32);
+      }
     } catch (err) {
       return Promise.resolve({ ok: false, error: err.message });
     }
@@ -254,7 +257,102 @@ contextBridge.exposeInMainWorld('athena', {
     return invoke(CHANNELS.EVIDENCE_SAVE_SNAPSHOT, {
       sessionId: payload.sessionId,
       dataUrl: payload.dataUrl,
+      trigger: payload.trigger,
+      timestamp: payload.timestamp,
     });
+  },
+
+  /**
+   * Persists a video chunk for optional continuous recording.
+   * @param {{ sessionId: string, chunk: string | Uint8Array, mimeType?: string }} payload
+   * @returns {Promise<{ ok: boolean, error?: string }>}
+   */
+  saveVideoChunk: (payload) => {
+    if (!payload || typeof payload !== 'object') {
+      return Promise.resolve({ ok: false, error: 'payload must be an object' });
+    }
+    try {
+      assertString(payload.sessionId, 'sessionId', 64);
+    } catch (err) {
+      return Promise.resolve({ ok: false, error: err.message });
+    }
+    return invoke(CHANNELS.EVIDENCE_SAVE_VIDEO_CHUNK, payload);
+  },
+
+  /**
+   * Returns storage telemetry and counts for a given session.
+   * @param {string} sessionId
+   * @returns {Promise<{ ok: boolean, data?: { sessionId: string, snapshotCount: number, videoBytes: number }, error?: string }>}
+   */
+  getEvidenceStatus: (sessionId) => {
+    return invoke(CHANNELS.EVIDENCE_GET_STATUS, { sessionId });
+  },
+
+  /**
+   * Cleans up local evidence artifacts for a closed or purged session.
+   * @param {string} sessionId
+   * @returns {Promise<{ ok: boolean, error?: string }>}
+   */
+  cleanupEvidence: (sessionId) => {
+    return invoke(CHANNELS.EVIDENCE_CLEANUP, { sessionId });
+  },
+
+  // -------------------------------------------------------------------------
+  // Domain: proctor
+  // Structured proctoring event system – records observable telemetry
+  // (fullscreen exits, window blurs, visibility changes, camera drops) with
+  // deduplication and timestamping.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Records an observable proctoring event.
+   * @param {{
+   *   sessionId: string,
+   *   eventType: string,
+   *   severity?: 'info' | 'warning' | 'critical',
+   *   source?: 'main-process' | 'renderer' | 'backend',
+   *   metadata?: Record<string, any>
+   * }} event
+   * @returns {Promise<{ ok: boolean, data?: object, error?: string }>}
+   */
+  recordProctorEvent: (event) => {
+    if (!event || typeof event !== 'object') {
+      return Promise.resolve({ ok: false, error: 'event must be an object' });
+    }
+    return invoke(CHANNELS.PROCTOR_RECORD_EVENT, event);
+  },
+
+  /**
+   * Retrieves all recorded proctoring events for a session.
+   * @param {string} sessionId
+   * @returns {Promise<{ ok: boolean, data?: Array<object>, error?: string }>}
+   */
+  getProctorEvents: (sessionId) => {
+    if (typeof sessionId !== 'string' || !sessionId.trim()) {
+      return Promise.resolve({ ok: false, error: 'sessionId must be a non-empty string' });
+    }
+    return invoke(CHANNELS.PROCTOR_GET_EVENTS, { sessionId: sessionId.trim() });
+  },
+
+  /**
+   * Subscribes to proctoring events recorded in real-time.
+   * Returns an unsubscribe cleanup function.
+   * @param {(event: object) => void} callback
+   * @returns {() => void}
+   */
+  onProctorEvent: (callback) => {
+    if (typeof callback !== 'function') return () => {};
+    const subscription = (_event, evt) => {
+      try {
+        callback(evt);
+      } catch (err) {
+        console.error('[preload] onProctorEvent subscriber error:', err);
+      }
+    };
+    ipcRenderer.on(CHANNELS.PROCTOR_EVENT_RECORDED, subscription);
+    return () => {
+      ipcRenderer.removeListener(CHANNELS.PROCTOR_EVENT_RECORDED, subscription);
+    };
   },
 
 });

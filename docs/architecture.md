@@ -275,3 +275,71 @@ To prevent candidates from navigating away from the assessment interface:
 
 **Preservation of Emergency Controls:**
 In accordance with system safety principles, Athena never interferes with emergency system controls (`Cmd+Q` on macOS, OS task-switching/kill controls on Windows/Linux) or disables operating-system security mechanisms. Machine owners can always safely terminate the process if needed.
+
+---
+
+## 10. Structured Proctoring Event Telemetry Architecture
+
+### 10.1 Observable Telemetry vs. Misconduct Policy
+> [!IMPORTANT]
+> **Observation vs. Violation Policy:**
+> Recorded proctoring events represent objective, observable system state telemetry (e.g. desktop focus shifts, OS notification popups, temporary network blurs, or webcam disconnects).
+> **A recorded event is NOT definitive proof of academic misconduct.** Telemetry serves exclusively as chronological context for post-exam human proctor review. The system strictly forbids automated punitive sanctions (such as automatic disqualification or failing scores) based on algorithmic event triggers.
+
+### 10.2 Event Schema Contract
+All proctoring events conform to a strict schema validated before recording:
+```typescript
+interface ProctoringEvent {
+  eventId: string;        // e.g. "evt-1790600123456-abcde"
+  sessionId: string;      // e.g. "session-1790600000000-f1234"
+  eventType: string;      // Known event type enum (e.g. "window:blur", "fullscreen:exit")
+  timestamp: string;      // ISO 8601 UTC timestamp
+  severity: 'info' | 'warning' | 'critical';
+  source: 'main-process' | 'renderer' | 'backend';
+  metadata: Record<string, unknown>; // Minimal contextual parameters (no PII)
+}
+```
+
+### 10.3 Event Deduplication & Throttling
+To prevent event spam during rapid state oscillations (e.g. brief notification popups or accidental key presses):
+- **Stateful Pairing**: Tracks stateful pairs (`window:blur`/`window:focus`, `fullscreen:exit`/`fullscreen:enter`, `visibility:hidden`/`visibility:visible`, `camera:terminated`/`camera:recovered`). Consecutive identical states are automatically suppressed.
+- **Debounce Throttling**: Oscillations occurring within `400ms` are filtered out.
+- **Discrete Event Throttling**: Discrete events (such as `navigation:blocked` or `window-open:blocked`) are throttled within the debounce window.
+
+---
+
+## 11. Evidence Capture & Local Storage Architecture
+
+### 11.1 Consent-Gated Capture Lifecycle
+Evidence capture is strictly deactivated by default and is only enabled when:
+1. The candidate has actively accepted the informed proctoring consent policy (`consentAccepted === true`).
+2. The examination session is officially initialized and active on the backend (`active === true && sessionId`).
+3. An active, live camera stream is verified (`isStreamLive(stream) === true`).
+
+Capture terminates immediately upon:
+- Session submission or candidate exit (`handleExitExam`).
+- Session cancellation or timer expiration.
+- Video stream failure (`track.onended`).
+- Application shutdown or component unmount.
+
+### 11.2 Configurable Snapshot Triggers
+1. **Session Start (`session:start`)**: An initial identification frame captured immediately upon active exam commencement.
+2. **Periodic Interval (`interval`)**: Configurable recurring capture (default: 60s) providing an observable timeline of testing activity.
+3. **Session Submission (`session:submit`)**: A final frame recorded upon exam completion.
+4. **Manual Trigger (`manual`)**: Candidate or proctor requested verification.
+
+An in-flight mutex (`inFlightRef`) strictly prevents overlapping concurrent snapshot captures.
+
+### 11.3 Optional Continuous Video Recording (MediaRecorder)
+When continuous video recording is explicitly configured:
+- Supported MIME types are dynamically probed (`video/webm;codecs=vp9,opus`, `video/webm;codecs=vp8,opus`, `video/webm`, `video/mp4`).
+- Chunks are acquired via timeslices (default: 10s) and streamed over IPC without keeping monolithic buffers in renderer memory.
+- Enforces an absolute **100 MB recording size cap per session** to prevent storage exhaustion.
+
+### 11.4 Storage Boundaries & Retention Limits
+- **Application Data Directory**: Snapshots are persisted under Electron's sandboxed `app.getPath('userData')/snapshots/<safeSessionId>/`, avoiding assumptions about packaged source directory writeability.
+- **Directory Traversal Prevention**: Session IDs and trigger names are strictly sanitized using `sanitizePathSegment` (stripping `..`, `/`, `\`, null bytes, and non-alphanumeric characters).
+- **Retention Rules**: Enforces a strict **100 snapshot limit per session**, automatically pruning the oldest file when the cap is reached.
+- **Memory Safety & Zero Content Logging**: Image binary buffers and base64 strings are never logged to console, error logs, or audit records.
+- **No Biometric Analysis**: Athena explicitly refrains from facial recognition, gaze tracking, emotion detection, or automated cheating scores.
+

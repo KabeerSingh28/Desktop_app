@@ -401,6 +401,261 @@ describe('Athena Backend Exam API', () => {
       expect(session.wrong).toBe(1);
       expect(session.answers[0].isCorrect).toBe(true);
       expect(session.answers[1].isCorrect).toBe(false);
+      expect(Array.isArray(session.events)).toBe(true);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 6. Proctoring Event Ingestion and Timeline (/exam/session/:sessionId/event[s])
+  // -------------------------------------------------------------------------
+  describe('Proctoring Events System', () => {
+    let proctorSessionId;
+
+    beforeAll(async () => {
+      const startRes = await fetch(`${baseUrl}/exam/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: 'student-proctor-1', name: 'Bob' }),
+      });
+      const data = await startRes.json();
+      proctorSessionId = data.sessionId;
+    });
+
+    it('records a valid proctoring event on an active session', async () => {
+      const res = await fetch(`${baseUrl}/exam/session/${proctorSessionId}/event`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          eventType: 'fullscreen:exit',
+          severity: 'warning',
+          source: 'main-process',
+          metadata: { reason: 'User toggled space' },
+        }),
+      });
+
+      expect(res.status).toBe(201);
+      const data = await res.json();
+      expect(data.event).toBeDefined();
+      expect(data.event.sessionId).toBe(proctorSessionId);
+      expect(data.event.eventType).toBe('fullscreen:exit');
+      expect(data.event.severity).toBe('warning');
+      expect(data.event.source).toBe('main-process');
+      expect(data.event.eventId).toMatch(/^evt-\d+-[a-z0-9]+$/);
+      expect(data.event.timestamp).toBeDefined();
+    });
+
+    it('retrieves recorded events for a session', async () => {
+      // Record a second event
+      await fetch(`${baseUrl}/exam/session/${proctorSessionId}/event`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          eventType: 'window:blur',
+          severity: 'warning',
+          source: 'main-process',
+        }),
+      });
+
+      const res = await fetch(`${baseUrl}/exam/session/${proctorSessionId}/events`);
+      expect(res.status).toBe(200);
+      const data = await res.json();
+      expect(Array.isArray(data.events)).toBe(true);
+      expect(data.events.length).toBe(2);
+      expect(data.events[0].eventType).toBe('fullscreen:exit');
+      expect(data.events[1].eventType).toBe('window:blur');
+    });
+
+    it('rejects recording with invalid eventType', async () => {
+      const res = await fetch(`${baseUrl}/exam/session/${proctorSessionId}/event`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          eventType: 'illegal:cheat:event',
+          severity: 'warning',
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      const data = await res.json();
+      expect(data.error).toContain('Invalid eventType');
+    });
+
+    it('rejects recording with invalid severity', async () => {
+      const res = await fetch(`${baseUrl}/exam/session/${proctorSessionId}/event`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          eventType: 'window:blur',
+          severity: 'apocalyptic',
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      const data = await res.json();
+      expect(data.error).toContain('Invalid severity');
+    });
+
+    it('returns 404 when recording an event on a nonexistent session', async () => {
+      const res = await fetch(`${baseUrl}/exam/session/session-nonexistent/event`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          eventType: 'window:blur',
+          severity: 'info',
+        }),
+      });
+
+      expect(res.status).toBe(404);
+    });
+
+    it('returns 404 when retrieving events on a nonexistent session', async () => {
+      const res = await fetch(`${baseUrl}/exam/session/session-nonexistent/events`);
+      expect(res.status).toBe(404);
+    });
+
+    it('rejects event recording on an already submitted session', async () => {
+      // Submit the proctor session
+      await fetch(`${baseUrl}/exam/submit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: proctorSessionId }),
+      });
+
+      const res = await fetch(`${baseUrl}/exam/session/${proctorSessionId}/event`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          eventType: 'window:blur',
+          severity: 'info',
+        }),
+      });
+
+      expect(res.status).toBe(409);
+      const data = await res.json();
+      expect(data.error).toContain('already submitted');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 7. Evidence Snapshot Ingestion (/exam/session/:sessionId/snapshot[s])
+  // -------------------------------------------------------------------------
+  describe('Evidence Snapshot API', () => {
+    let snapshotSessionId;
+    const validDataUrl = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEASABIAAD==';
+
+    beforeAll(async () => {
+      const startRes = await fetch(`${baseUrl}/exam/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: 'student-snap-1', name: 'Carol' }),
+      });
+      const data = await startRes.json();
+      snapshotSessionId = data.sessionId;
+    });
+
+    it('records snapshot metadata on an active session', async () => {
+      const res = await fetch(`${baseUrl}/exam/session/${snapshotSessionId}/snapshot`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dataUrl: validDataUrl,
+          trigger: 'session:start',
+        }),
+      });
+
+      expect(res.status).toBe(201);
+      const data = await res.json();
+      expect(data.ok).toBe(true);
+      expect(data.snapshotId).toMatch(/^snap-\d+-[a-z0-9]+$/);
+      expect(data.count).toBe(1);
+    });
+
+    it('retrieves recorded snapshot metadata for the session', async () => {
+      // Record a second periodic snapshot
+      await fetch(`${baseUrl}/exam/session/${snapshotSessionId}/snapshot`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dataUrl: validDataUrl,
+          trigger: 'interval',
+        }),
+      });
+
+      const res = await fetch(`${baseUrl}/exam/session/${snapshotSessionId}/snapshots`);
+      expect(res.status).toBe(200);
+      const data = await res.json();
+      expect(data.count).toBe(2);
+      expect(data.snapshots[0].trigger).toBe('session_start'); // sanitized
+      expect(data.snapshots[1].trigger).toBe('interval');
+      expect(data.snapshots[0].sizeBytes).toBeGreaterThan(0);
+    });
+
+    it('rejects recording snapshot with invalid dataUrl', async () => {
+      const res = await fetch(`${baseUrl}/exam/session/${snapshotSessionId}/snapshot`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dataUrl: 'not-an-image-url',
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      const data = await res.json();
+      expect(data.error).toContain('dataUrl must be an image data URL');
+    });
+
+    it('rejects oversized snapshot (>512KB)', async () => {
+      const huge = 'data:image/jpeg;base64,' + 'B'.repeat(512 * 1024 + 1);
+      const res = await fetch(`${baseUrl}/exam/session/${snapshotSessionId}/snapshot`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dataUrl: huge,
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      const data = await res.json();
+      expect(data.error).toContain('exceeds maximum size');
+    });
+
+    it('returns 404 when recording snapshot on non-existent session', async () => {
+      const res = await fetch(`${baseUrl}/exam/session/session-nonexistent/snapshot`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dataUrl: validDataUrl,
+        }),
+      });
+
+      expect(res.status).toBe(404);
+    });
+
+    it('returns 404 when retrieving snapshots on non-existent session', async () => {
+      const res = await fetch(`${baseUrl}/exam/session/session-nonexistent/snapshots`);
+      expect(res.status).toBe(404);
+    });
+
+    it('rejects snapshot on an already submitted session', async () => {
+      // Submit session
+      await fetch(`${baseUrl}/exam/submit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: snapshotSessionId }),
+      });
+
+      const res = await fetch(`${baseUrl}/exam/session/${snapshotSessionId}/snapshot`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dataUrl: validDataUrl,
+        }),
+      });
+
+      expect(res.status).toBe(409);
+      const data = await res.json();
+      expect(data.error).toContain('already submitted');
     });
   });
 });
+

@@ -36,6 +36,12 @@ const CHANNELS = Object.freeze({
   EXAM_SUBMIT_SESSION:        'athena:exam:submit-session',
   EXAM_CANCEL_SESSION:        'athena:exam:cancel-session',
   EVIDENCE_SAVE_SNAPSHOT:     'athena:evidence:save-snapshot',
+  EVIDENCE_SAVE_VIDEO_CHUNK:  'athena:evidence:save-video-chunk',
+  EVIDENCE_GET_STATUS:        'athena:evidence:get-status',
+  EVIDENCE_CLEANUP:           'athena:evidence:cleanup',
+  PROCTOR_RECORD_EVENT:       'athena:proctor:record-event',
+  PROCTOR_GET_EVENTS:         'athena:proctor:get-events',
+  PROCTOR_EVENT_RECORDED:     'athena:proctor:event-recorded',
 });
 
 // ---------------------------------------------------------------------------
@@ -102,7 +108,22 @@ function validateKioskPayload(payload) {
 }
 
 /**
+ * Sanitizes a directory or file path segment to eliminate directory traversal
+ * attacks (e.g. "../", absolute paths, null bytes) and special filesystem characters.
+ *
+ * @param {string} segment
+ * @returns {string}
+ */
+function sanitizePathSegment(segment) {
+  if (typeof segment !== 'string') return 'unknown';
+  // Strip null bytes and path delimiters, restrict to alphanumeric, hyphen, underscore
+  const cleaned = segment.replace(/[\0/\\]/g, '').replace(/[^a-zA-Z0-9_-]/g, '').trim();
+  return cleaned || 'unknown';
+}
+
+/**
  * Validates the evidence payload for athena:evidence:save-snapshot.
+ *
  * @param {unknown} payload
  * @throws {TypeError}
  */
@@ -119,6 +140,39 @@ function validateSnapshotPayload(payload) {
   }
   if (!payload.dataUrl.includes(',')) {
     throw new TypeError('Invalid data URL format');
+  }
+
+  if (payload.trigger !== undefined) {
+    validateString(payload.trigger, 'trigger', 32);
+  }
+  if (payload.timestamp !== undefined) {
+    if (typeof payload.timestamp !== 'string' && typeof payload.timestamp !== 'number') {
+      throw new TypeError('timestamp must be a string or number');
+    }
+  }
+}
+
+/**
+ * Validates the payload for athena:evidence:save-video-chunk.
+ *
+ * @param {unknown} payload
+ * @throws {TypeError}
+ */
+function validateVideoChunkPayload(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new TypeError('Video chunk payload must be a plain object');
+  }
+  validateString(payload.sessionId, 'sessionId', 64);
+
+  if (typeof payload.chunk === 'string') {
+    // Base64 chunk capped at 10 MB
+    validateString(payload.chunk, 'chunk', 10 * 1024 * 1024);
+  } else if (!payload.chunk || (!Buffer.isBuffer(payload.chunk) && !(payload.chunk instanceof Uint8Array))) {
+    throw new TypeError('chunk must be a base64 string or binary buffer');
+  }
+
+  if (payload.mimeType !== undefined) {
+    validateString(payload.mimeType, 'mimeType', 64);
   }
 }
 
@@ -231,15 +285,163 @@ function isRestrictedExamShortcut(input, { isDev = false, examInProgress = false
 }
 
 // ---------------------------------------------------------------------------
+// Proctoring Event System Specifications & Utilities
+// ---------------------------------------------------------------------------
+
+const KNOWN_PROCTOR_EVENT_TYPES = Object.freeze([
+  'fullscreen:exit',
+  'fullscreen:enter',
+  'window:blur',
+  'window:focus',
+  'visibility:hidden',
+  'visibility:visible',
+  'navigation:blocked',
+  'window-open:blocked',
+  'camera:interrupted',
+  'camera:terminated',
+  'camera:recovered',
+  'backend:disconnected',
+  'backend:reconnected',
+  'monitoring:error',
+]);
+
+const PROCTOR_SEVERITIES = Object.freeze(['info', 'warning', 'critical']);
+const PROCTOR_SOURCES = Object.freeze(['main-process', 'renderer', 'backend']);
+
+/**
+ * Validates a proctoring event payload before sending across IPC or recording.
+ *
+ * @param {unknown} payload
+ * @throws {TypeError}
+ */
+function validateProctorEventPayload(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new TypeError('Proctoring event payload must be a plain object');
+  }
+
+  if (!payload.eventType || !KNOWN_PROCTOR_EVENT_TYPES.includes(payload.eventType)) {
+    throw new TypeError(
+      `Invalid eventType "${payload.eventType}". Must be one of: ${KNOWN_PROCTOR_EVENT_TYPES.join(', ')}`
+    );
+  }
+
+  if (!payload.severity || !PROCTOR_SEVERITIES.includes(payload.severity)) {
+    throw new TypeError(
+      `Invalid severity "${payload.severity}". Must be one of: ${PROCTOR_SEVERITIES.join(', ')}`
+    );
+  }
+
+  if (payload.source && !PROCTOR_SOURCES.includes(payload.source)) {
+    throw new TypeError(
+      `Invalid source "${payload.source}". Must be one of: ${PROCTOR_SOURCES.join(', ')}`
+    );
+  }
+
+  if (payload.metadata !== undefined && (typeof payload.metadata !== 'object' || payload.metadata === null || Array.isArray(payload.metadata))) {
+    throw new TypeError('metadata must be a plain object');
+  }
+}
+
+/**
+ * EventDeduplicator
+ *
+ * Suppresses rapid duplicate event spam and handles stateful transitions.
+ * Stateful pairs (e.g. window:blur / window:focus) are tracked so that:
+ * 1. Redundant consecutive events (e.g. blur followed by blur without intervening focus) are suppressed.
+ * 2. Rapid oscillations within debounceMs (default 400ms) are filtered out.
+ * 3. Discrete events (navigation:blocked, window-open:blocked) are throttled if identical within debounceMs.
+ */
+class EventDeduplicator {
+  constructor({ debounceMs = 400 } = {}) {
+    this.debounceMs = debounceMs;
+    this.statefulMap = new Map();
+    this.lastRecordedTimestamps = new Map();
+
+    this.pairedCategories = {
+      'window:blur': { category: 'window-focus', state: 'blur' },
+      'window:focus': { category: 'window-focus', state: 'focus' },
+      'fullscreen:exit': { category: 'fullscreen', state: 'exit' },
+      'fullscreen:enter': { category: 'fullscreen', state: 'enter' },
+      'visibility:hidden': { category: 'visibility', state: 'hidden' },
+      'visibility:visible': { category: 'visibility', state: 'visible' },
+      'camera:terminated': { category: 'camera', state: 'terminated' },
+      'camera:recovered': { category: 'camera', state: 'recovered' },
+      'backend:disconnected': { category: 'backend', state: 'disconnected' },
+      'backend:reconnected': { category: 'backend', state: 'reconnected' },
+    };
+  }
+
+  /**
+   * Determines whether an event should be recorded.
+   * If true, updates internal deduplication state.
+   *
+   * @param {{ eventType: string, timestamp?: string | number }} event
+   * @returns {boolean}
+   */
+  shouldRecord(event) {
+    if (!event || !event.eventType) return false;
+
+    const eventType = event.eventType;
+    const now = typeof event.timestamp === 'number'
+      ? event.timestamp
+      : (event.timestamp ? new Date(event.timestamp).getTime() : Date.now());
+
+    // 1. Stateful event check
+    const paired = this.pairedCategories[eventType];
+    if (paired) {
+      const currentState = this.statefulMap.get(paired.category);
+      // Suppress duplicate consecutive event in same state
+      if (currentState === paired.state) {
+        return false;
+      }
+
+      // Check rapid toggle within debounce window
+      const lastRecorded = this.lastRecordedTimestamps.get(eventType) || 0;
+      if (now - lastRecorded < this.debounceMs) {
+        return false;
+      }
+
+      this.statefulMap.set(paired.category, paired.state);
+      this.lastRecordedTimestamps.set(eventType, now);
+      return true;
+    }
+
+    // 2. Discrete events (e.g. navigation:blocked, monitoring:error)
+    const lastRecorded = this.lastRecordedTimestamps.get(eventType) || 0;
+    if (now - lastRecorded < this.debounceMs) {
+      return false; // Throttled
+    }
+
+    this.lastRecordedTimestamps.set(eventType, now);
+    return true;
+  }
+
+  /**
+   * Clears all internal deduplication state.
+   */
+  reset() {
+    this.statefulMap.clear();
+    this.lastRecordedTimestamps.clear();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Exports – CommonJS so this file loads in both Electron and Vitest
 // ---------------------------------------------------------------------------
 module.exports = {
   CHANNELS,
+  KNOWN_PROCTOR_EVENT_TYPES,
+  PROCTOR_SEVERITIES,
+  PROCTOR_SOURCES,
   validateString,
   validateCandidatePayload,
   validateSessionIdPayload,
   validateKioskPayload,
   validateSnapshotPayload,
+  validateVideoChunkPayload,
+  sanitizePathSegment,
+  validateProctorEventPayload,
+  EventDeduplicator,
   isAllowedNavigationUrl,
   isRestrictedExamShortcut,
 };

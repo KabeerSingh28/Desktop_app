@@ -44,6 +44,10 @@ const {
   validateSessionIdPayload,
   validateKioskPayload,
   validateSnapshotPayload,
+  validateVideoChunkPayload,
+  sanitizePathSegment,
+  validateProctorEventPayload,
+  EventDeduplicator,
   isAllowedNavigationUrl,
   isRestrictedExamShortcut,
 } = require('./ipc-helpers.cjs');
@@ -76,6 +80,80 @@ let examDeadlineEpoch = null;
  * @type {boolean}
  */
 let examInProgress = false;
+
+/**
+ * Active exam session ID associated with proctoring events.
+ * @type {string|null}
+ */
+let activeSessionId = null;
+
+/**
+ * Proctoring event deduplicator to suppress event spam and manage stateful transitions.
+ */
+const proctorDeduplicator = new EventDeduplicator();
+
+/**
+ * Records an observable proctoring event during an active exam session.
+ * Deduplicates, broadcasts to renderer, and persists to backend.
+ */
+async function recordProctorEvent({ eventType, severity = 'info', source = 'main-process', metadata = {} }) {
+  if (!examInProgress || !activeSessionId) return null;
+
+  const timestamp = new Date().toISOString();
+  if (!proctorDeduplicator.shouldRecord({ eventType, timestamp })) {
+    return null; // Suppressed duplicate / throttled
+  }
+
+  const event = {
+    eventId: `evt-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    sessionId: activeSessionId,
+    eventType,
+    timestamp,
+    severity,
+    source,
+    metadata,
+  };
+
+  // 1. Broadcast to renderer in real time
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(CHANNELS.PROCTOR_EVENT_RECORDED, event);
+  }
+
+  // 2. Persist to backend service
+  const BACKEND_PORT = process.env.EXAM_BACKEND_PORT || 6001;
+  fetch(`http://localhost:${BACKEND_PORT}/exam/session/${activeSessionId}/event`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(event),
+  }).catch((err) => {
+    console.warn('[main] Failed to persist proctor event to backend:', err.message);
+  });
+
+  return event;
+}
+
+/**
+ * Safely restores the window to normal non-fullscreen, non-kiosk state
+ * and cleans up proctoring deduplication and deadline timers.
+ */
+function restoreNormalWindowState() {
+  examDeadlineEpoch = null;
+  examInProgress = false;
+  activeSessionId = null;
+  proctorDeduplicator.reset();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      if (mainWindow.isKiosk()) {
+        mainWindow.setKiosk(false);
+      }
+      if (mainWindow.isFullScreen()) {
+        mainWindow.setFullScreen(false);
+      }
+    } catch (err) {
+      console.warn('[main] Error restoring normal window state:', err.message);
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Single-instance lock
@@ -181,6 +259,11 @@ function createMainWindow() {
   // Deny all unexpected window popups or target="_blank" window creations
   mainWindow.webContents.setWindowOpenHandler((details) => {
     console.warn('[main] Blocked unexpected window popup attempt to:', details.url);
+    recordProctorEvent({
+      eventType: 'window-open:blocked',
+      severity: 'critical',
+      metadata: { attemptedUrl: details.url },
+    });
     return { action: 'deny' };
   });
 
@@ -197,6 +280,11 @@ function createMainWindow() {
     if (!isAllowed) {
       event.preventDefault();
       console.warn('[main] Blocked unauthorized navigation attempt to:', navigationUrl);
+      recordProctorEvent({
+        eventType: 'navigation:blocked',
+        severity: 'critical',
+        metadata: { attemptedUrl: navigationUrl },
+      });
     }
   });
 
@@ -209,6 +297,11 @@ function createMainWindow() {
     if (!isAllowed) {
       event.preventDefault();
       console.warn('[main] Blocked unauthorized redirect attempt to:', redirectUrl);
+      recordProctorEvent({
+        eventType: 'navigation:blocked',
+        severity: 'critical',
+        metadata: { attemptedUrl: redirectUrl },
+      });
     }
   });
 
@@ -220,7 +313,7 @@ function createMainWindow() {
     }
   });
 
-  // Notify the renderer of fullscreen and kiosk state changes
+  // Notify the renderer of fullscreen and kiosk state changes & record observations
   function emitWindowState() {
     if (mainWindow && !mainWindow.isDestroyed()) {
       const state = {
@@ -231,10 +324,27 @@ function createMainWindow() {
     }
   }
 
-  mainWindow.on('enter-full-screen', emitWindowState);
-  mainWindow.on('leave-full-screen', emitWindowState);
+  mainWindow.on('enter-full-screen', () => {
+    emitWindowState();
+    recordProctorEvent({ eventType: 'fullscreen:enter', severity: 'info' });
+  });
+
+  mainWindow.on('leave-full-screen', () => {
+    emitWindowState();
+    recordProctorEvent({ eventType: 'fullscreen:exit', severity: 'warning' });
+  });
+
   mainWindow.webContents.on('enter-html-full-screen', emitWindowState);
   mainWindow.webContents.on('leave-html-full-screen', emitWindowState);
+
+  // Monitor window focus and blur transitions during active exam
+  mainWindow.on('blur', () => {
+    recordProctorEvent({ eventType: 'window:blur', severity: 'warning' });
+  });
+
+  mainWindow.on('focus', () => {
+    recordProctorEvent({ eventType: 'window:focus', severity: 'info' });
+  });
 
   // Crash recovery: restore normal window state if the renderer crashes
   mainWindow.webContents.on('render-process-gone', (event, details) => {
@@ -303,24 +413,6 @@ function registerIpcHandlers() {
       version: app.getVersion(),
     };
   });
-
-  // Helper to safely restore the window to normal non-fullscreen, non-kiosk state
-  function restoreNormalWindowState() {
-    examDeadlineEpoch = null;
-    examInProgress = false;
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      try {
-        if (mainWindow.isKiosk()) {
-          mainWindow.setKiosk(false);
-        }
-        if (mainWindow.isFullScreen()) {
-          mainWindow.setFullScreen(false);
-        }
-      } catch (err) {
-        console.warn('[main] Error restoring normal window state:', err.message);
-      }
-    }
-  }
 
   // ── athena:window:enter-fullscreen ────────────────────────────────────────
   /**
@@ -514,6 +606,10 @@ function registerIpcHandlers() {
       console.warn('[main] Could not fetch question count:', err.message);
     }
 
+    // Associate active session for proctoring observations and reset deduplicator
+    activeSessionId = session.sessionId;
+    proctorDeduplicator.reset();
+
     // Record deadline in main process (default: 45 minutes from now)
     const EXAM_DURATION_MS = (Number(process.env.EXAM_DURATION_MINUTES) || 45) * 60 * 1000;
     examDeadlineEpoch = Date.now() + EXAM_DURATION_MS;
@@ -587,30 +683,219 @@ function registerIpcHandlers() {
    *   - Files written to app.getPath('userData')/snapshots/<sessionId>/ so the
    *     renderer never learns or controls filesystem paths.
    */
+  // ── athena:evidence:save-snapshot ─────────────────────────────────────────
+  /**
+   * Persists a base64 webcam snapshot for the current session.
+   *
+   * Payload: { sessionId: string, dataUrl: string, trigger?: string, timestamp?: string | number }
+   *
+   * Security & Reliability checks:
+   *   - Sender must be the main window.
+   *   - dataUrl must start with "data:image/" (enforced in preload too, defence in depth).
+   *   - dataUrl size capped at 512 KB to prevent memory exhaustion.
+   *   - Sanitizes sessionId to prevent directory traversal attacks.
+   *   - Files written to app.getPath('userData')/snapshots/<safeSessionId>/ so the
+   *     renderer never learns or controls filesystem paths.
+   *   - Retention policy: enforces a 100-snapshot cap per session (prunes oldest)
+   *     to prevent disk exhaustion.
+   *   - Never logs image content or raw base64 data to stdout or disk.
+   *   - Catches disk write/quota errors gracefully without crashing the main process.
+   */
   ipcMain.handle(CHANNELS.EVIDENCE_SAVE_SNAPSHOT, async (event, payload) => {
-    if (!isFromMainWindow(event)) throw new Error('Unauthorized sender');
-    validateSnapshotPayload(payload);
+    if (!isFromMainWindow(event)) return { ok: false, error: 'Unauthorized sender' };
+    try {
+      validateSnapshotPayload(payload);
 
-    // Extract base64 body (after the comma in "data:image/jpeg;base64,<body>")
-    const commaIdx = payload.dataUrl.indexOf(',');
-    const base64 = payload.dataUrl.slice(commaIdx + 1);
+      const safeSessionId = sanitizePathSegment(payload.sessionId);
+      const safeTrigger = sanitizePathSegment(payload.trigger || 'snap');
 
-    // Resolve a safe, writable path inside the user data directory
-    const snapshotDir = path.join(
-      app.getPath('userData'),
-      'snapshots',
-      payload.sessionId,
-    );
-    await fs.promises.mkdir(snapshotDir, { recursive: true });
+      // Extract base64 body (after the comma in "data:image/jpeg;base64,<body>")
+      const commaIdx = payload.dataUrl.indexOf(',');
+      const base64 = payload.dataUrl.slice(commaIdx + 1);
 
-    const filename = `snap-${Date.now()}.jpg`;
-    await fs.promises.writeFile(
-      path.join(snapshotDir, filename),
-      Buffer.from(base64, 'base64'),
-    );
+      // Resolve safe, writable path inside the user data directory
+      const snapshotDir = path.join(
+        app.getPath('userData'),
+        'snapshots',
+        safeSessionId,
+      );
+      await fs.promises.mkdir(snapshotDir, { recursive: true });
 
-    // Return nothing to the renderer – file path is never disclosed
-    return { ok: true };
+      // Retention check: cap at 100 snapshots per session
+      try {
+        const existingFiles = await fs.promises.readdir(snapshotDir);
+        if (existingFiles.length >= 100) {
+          // Prune oldest file
+          const sorted = existingFiles.sort();
+          if (sorted.length > 0) {
+            await fs.promises.unlink(path.join(snapshotDir, sorted[0])).catch(() => {});
+          }
+        }
+      } catch {
+        // Non-fatal if readdir fails
+      }
+
+      const ts = typeof payload.timestamp === 'number'
+        ? payload.timestamp
+        : (payload.timestamp ? new Date(payload.timestamp).getTime() : Date.now());
+      const filename = `snap-${safeTrigger}-${ts}.jpg`;
+
+      await fs.promises.writeFile(
+        path.join(snapshotDir, filename),
+        Buffer.from(base64, 'base64'),
+      );
+
+      return { ok: true, data: { filename } };
+    } catch (err) {
+      console.error('[main] athena:evidence:save-snapshot – disk error:', err.code || err.message);
+      return { ok: false, error: `Failed to save evidence snapshot: ${err.message}` };
+    }
+  });
+
+  // ── athena:evidence:save-video-chunk ──────────────────────────────────────
+  /**
+   * Persists a continuous video recording chunk (optional feature using MediaRecorder).
+   *
+   * Payload: { sessionId: string, chunk: string | Uint8Array, mimeType?: string }
+   */
+  ipcMain.handle(CHANNELS.EVIDENCE_SAVE_VIDEO_CHUNK, async (event, payload) => {
+    if (!isFromMainWindow(event)) return { ok: false, error: 'Unauthorized sender' };
+    try {
+      validateVideoChunkPayload(payload);
+
+      const safeSessionId = sanitizePathSegment(payload.sessionId);
+      const videoDir = path.join(app.getPath('userData'), 'recordings', safeSessionId);
+      await fs.promises.mkdir(videoDir, { recursive: true });
+
+      const videoPath = path.join(videoDir, 'session-recording.webm');
+
+      // Enforce 100 MB max recording size limit per session
+      try {
+        const stats = await fs.promises.stat(videoPath);
+        if (stats.size > 100 * 1024 * 1024) {
+          return { ok: false, error: 'Maximum recording size limit reached (100MB)' };
+        }
+      } catch {
+        // File does not exist yet; safe to create
+      }
+
+      const buffer = typeof payload.chunk === 'string'
+        ? Buffer.from(payload.chunk, 'base64')
+        : Buffer.from(payload.chunk);
+
+      await fs.promises.appendFile(videoPath, buffer);
+      return { ok: true };
+    } catch (err) {
+      console.error('[main] athena:evidence:save-video-chunk – disk error:', err.code || err.message);
+      return { ok: false, error: `Failed to write video chunk: ${err.message}` };
+    }
+  });
+
+  // ── athena:evidence:get-status ────────────────────────────────────────────
+  /**
+   * Returns current evidence storage diagnostics (snapshot count, recording bytes).
+   */
+  ipcMain.handle(CHANNELS.EVIDENCE_GET_STATUS, async (event, payload) => {
+    if (!isFromMainWindow(event)) return { ok: false, error: 'Unauthorized sender' };
+    try {
+      const safeSessionId = sanitizePathSegment(payload?.sessionId || activeSessionId || 'default');
+      const snapshotDir = path.join(app.getPath('userData'), 'snapshots', safeSessionId);
+      let snapshotCount = 0;
+      try {
+        const files = await fs.promises.readdir(snapshotDir);
+        snapshotCount = files.filter((f) => f.endsWith('.jpg') || f.endsWith('.png')).length;
+      } catch {
+        snapshotCount = 0;
+      }
+
+      const videoPath = path.join(app.getPath('userData'), 'recordings', safeSessionId, 'session-recording.webm');
+      let videoBytes = 0;
+      try {
+        const stat = await fs.promises.stat(videoPath);
+        videoBytes = stat.size;
+      } catch {
+        videoBytes = 0;
+      }
+
+      return {
+        ok: true,
+        data: {
+          sessionId: safeSessionId,
+          snapshotCount,
+          videoBytes,
+        },
+      };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // ── athena:evidence:cleanup ───────────────────────────────────────────────
+  /**
+   * Cleans up local evidence artifacts for a closed or purged session.
+   */
+  ipcMain.handle(CHANNELS.EVIDENCE_CLEANUP, async (event, payload) => {
+    if (!isFromMainWindow(event)) return { ok: false, error: 'Unauthorized sender' };
+    try {
+      const safeSessionId = sanitizePathSegment(payload?.sessionId);
+      if (!safeSessionId || safeSessionId === 'unknown') {
+        return { ok: false, error: 'Valid sessionId required for cleanup' };
+      }
+      const snapDir = path.join(app.getPath('userData'), 'snapshots', safeSessionId);
+      const recDir = path.join(app.getPath('userData'), 'recordings', safeSessionId);
+      await fs.promises.rm(snapDir, { recursive: true, force: true });
+      await fs.promises.rm(recDir, { recursive: true, force: true });
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // ── athena:proctor:record-event ───────────────────────────────────────────
+  /**
+   * Receives and records an observable event from the renderer (e.g. visibility change,
+   * camera loss, network status). Validates payload, deduplicates, broadcasts, and persists.
+   */
+  ipcMain.handle(CHANNELS.PROCTOR_RECORD_EVENT, async (event, payload) => {
+    if (!isFromMainWindow(event)) return { ok: false, error: 'Unauthorized sender' };
+    if (!examInProgress || !activeSessionId) {
+      return { ok: false, error: 'No active exam session for proctoring event' };
+    }
+
+    try {
+      validateProctorEventPayload(payload);
+      const recorded = await recordProctorEvent({
+        eventType: payload.eventType,
+        severity: payload.severity,
+        source: payload.source || 'renderer',
+        metadata: payload.metadata || {},
+      });
+      return { ok: true, data: recorded };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // ── athena:proctor:get-events ─────────────────────────────────────────────
+  /**
+   * Retrieves the event history for an exam session.
+   */
+  ipcMain.handle(CHANNELS.PROCTOR_GET_EVENTS, async (event, payload) => {
+    if (!isFromMainWindow(event)) return { ok: false, error: 'Unauthorized sender' };
+    const targetSessionId = payload?.sessionId || activeSessionId;
+    if (!targetSessionId) return { ok: true, data: [] };
+
+    const BACKEND_PORT = process.env.EXAM_BACKEND_PORT || 6001;
+    try {
+      const res = await fetch(`http://localhost:${BACKEND_PORT}/exam/session/${targetSessionId}/events`);
+      if (res.ok) {
+        const body = await res.json();
+        return { ok: true, data: body.events || [] };
+      }
+      return { ok: false, error: `Backend returned status ${res.status}` };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
   });
 }
 

@@ -56,6 +56,8 @@ examRouter.post('/start', async (req, res, next) => {
       correct: 0,
       wrong: 0,
       answers: [],
+      events: [],
+      snapshots: [],
     };
 
     sessions.push(session);
@@ -282,3 +284,204 @@ examRouter.post('/submit', async (req, res, next) => {
     return next(err);
   }
 });
+
+const ALLOWED_PROCTOR_EVENT_TYPES = new Set([
+  'fullscreen:exit',
+  'fullscreen:enter',
+  'window:blur',
+  'window:focus',
+  'visibility:hidden',
+  'visibility:visible',
+  'navigation:blocked',
+  'window-open:blocked',
+  'camera:interrupted',
+  'camera:terminated',
+  'camera:recovered',
+  'backend:disconnected',
+  'backend:reconnected',
+  'monitoring:error',
+]);
+
+const ALLOWED_PROCTOR_SEVERITIES = new Set(['info', 'warning', 'critical']);
+const ALLOWED_PROCTOR_SOURCES = new Set(['main-process', 'renderer', 'backend']);
+
+/**
+ * POST /exam/session/:sessionId/event
+ * Records a structured proctoring event for an active exam session.
+ */
+examRouter.post('/session/:sessionId/event', async (req, res, next) => {
+  try {
+    const rawSessionId = req.params.sessionId;
+    if (!rawSessionId || typeof rawSessionId !== 'string' || rawSessionId.trim() === '') {
+      return res.status(400).json({ error: 'Valid sessionId parameter is required' });
+    }
+
+    const sessions = await readSessions();
+    const session = sessions.find((s) => s.sessionId === rawSessionId.trim());
+
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    if (session.status === 'submitted') {
+      return res.status(409).json({ error: 'Exam is already submitted. Events cannot be recorded.' });
+    }
+
+    const { eventId, eventType, timestamp, severity, source = 'renderer', metadata } = req.body || {};
+
+    if (!eventType || typeof eventType !== 'string' || !ALLOWED_PROCTOR_EVENT_TYPES.has(eventType)) {
+      return res.status(400).json({
+        error: `Invalid eventType "${eventType}". Must be one of: ${Array.from(ALLOWED_PROCTOR_EVENT_TYPES).join(', ')}`,
+      });
+    }
+
+    if (!severity || typeof severity !== 'string' || !ALLOWED_PROCTOR_SEVERITIES.has(severity)) {
+      return res.status(400).json({
+        error: 'Invalid severity. Must be one of: info, warning, critical',
+      });
+    }
+
+    const effectiveSource = typeof source === 'string' && source.trim() ? source.trim() : 'renderer';
+    if (!ALLOWED_PROCTOR_SOURCES.has(effectiveSource)) {
+      return res.status(400).json({
+        error: 'Invalid source. Must be one of: main-process, renderer, backend',
+      });
+    }
+
+    const sanitizedEvent = {
+      eventId: typeof eventId === 'string' && eventId.trim() ? eventId.trim() : `evt-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      sessionId: session.sessionId,
+      eventType,
+      timestamp: typeof timestamp === 'string' && timestamp.trim() ? timestamp.trim() : new Date().toISOString(),
+      severity,
+      source: effectiveSource,
+      metadata: metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {},
+    };
+
+    session.events = session.events || [];
+    // Cap events array to 500 entries per session
+    if (session.events.length < 500) {
+      session.events.push(sanitizedEvent);
+      await saveSessions(sessions);
+    }
+
+    return res.status(201).json({
+      ok: true,
+      message: 'Proctoring event recorded',
+      event: sanitizedEvent,
+      eventId: sanitizedEvent.eventId,
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * GET /exam/session/:sessionId/events
+ * Retrieves the event timeline for a session.
+ */
+examRouter.get('/session/:sessionId/events', async (req, res, next) => {
+  try {
+    const rawSessionId = req.params.sessionId;
+    const sessions = await readSessions();
+    const session = sessions.find((s) => s.sessionId === rawSessionId.trim());
+
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    const events = session.events || [];
+    return res.json({
+      sessionId: session.sessionId,
+      count: events.length,
+      events,
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * POST /exam/session/:sessionId/snapshot
+ * Records metadata for a proctoring webcam snapshot.
+ */
+examRouter.post('/session/:sessionId/snapshot', async (req, res, next) => {
+  try {
+    const rawSessionId = req.params.sessionId;
+    const sessions = await readSessions();
+    const session = sessions.find((s) => s.sessionId === rawSessionId.trim());
+
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    if (session.status === 'submitted') {
+      return res.status(409).json({ error: 'Exam is already submitted. Snapshots cannot be recorded.' });
+    }
+
+    const { dataUrl, trigger = 'interval', timestamp } = req.body || {};
+    if (!dataUrl || typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/')) {
+      return res.status(400).json({ error: 'dataUrl must be an image data URL' });
+    }
+
+    // 512 KB hard cap on snapshot payload
+    if (dataUrl.length > 512 * 1024) {
+      return res.status(400).json({ error: 'dataUrl exceeds maximum size of 512 KB' });
+    }
+
+    const snapshotId = `snap-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const safeTrigger = String(trigger).replace(/:/g, '_').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32) || 'snap';
+    const safeTs = typeof timestamp === 'string' && timestamp ? timestamp : new Date().toISOString();
+
+    session.snapshots = session.snapshots || [];
+
+    // Cap at 100 snapshots per session (retention rule)
+    if (session.snapshots.length >= 100) {
+      session.snapshots.shift();
+    }
+
+    session.snapshots.push({
+      snapshotId,
+      trigger: safeTrigger,
+      timestamp: safeTs,
+      sizeBytes: Math.round((dataUrl.length * 3) / 4),
+    });
+
+    await saveSessions(sessions);
+
+    return res.status(201).json({
+      ok: true,
+      message: 'Snapshot metadata recorded',
+      snapshotId,
+      count: session.snapshots.length,
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * GET /exam/session/:sessionId/snapshots
+ * Retrieves snapshot metadata for a session.
+ */
+examRouter.get('/session/:sessionId/snapshots', async (req, res, next) => {
+  try {
+    const rawSessionId = req.params.sessionId;
+    const sessions = await readSessions();
+    const session = sessions.find((s) => s.sessionId === rawSessionId.trim());
+
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    const snapshots = session.snapshots || [];
+    return res.json({
+      sessionId: session.sessionId,
+      count: snapshots.length,
+      snapshots,
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+

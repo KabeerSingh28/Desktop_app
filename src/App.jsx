@@ -4,14 +4,22 @@ function App() {
   const videoRef = useRef(null);
 
   async function getCamera() {
-    const videoData = await navigator.mediaDevices.getUserMedia({
-      video: true,
-    });
+    // Camera access is handled natively by the browser (getUserMedia).
+    // No IPC needed here – the main process does not mediate camera access.
+    const videoData = await navigator.mediaDevices.getUserMedia({ video: true });
     videoRef.current.srcObject = videoData;
   }
 
-  async function getFullscreen(){
-    await document.documentElement.requestFullscreen()
+  async function getFullscreen() {
+    // Route fullscreen through the IPC bridge (window.athena) so the main
+    // process can enforce kiosk-level lockdown in a later phase without
+    // the renderer needing to change. Fallback to the DOM API if running
+    // outside Electron (e.g. Storybook / browser dev preview).
+    if (window.athena) {
+      await window.athena.enterFullscreen();
+    } else {
+      await document.documentElement.requestFullscreen();
+    }
   }
 
   return (

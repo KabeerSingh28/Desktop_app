@@ -5,7 +5,7 @@ function App() {
   const [examState, setExamState] = useState('readiness'); // 'readiness' | 'active'
   const [activeSession, setActiveSession] = useState(null);
 
-  function handleStartExam({ candidateName, candidateId, session }) {
+  async function handleStartExam({ candidateName, candidateId, session }) {
     setActiveSession({
       candidateName,
       candidateId,
@@ -13,9 +13,35 @@ function App() {
       startedAt: new Date().toISOString(),
     });
     setExamState('active');
+
+    // Ensure desktop window enters fullscreen for the active examination session
+    if (window.athena?.enterFullscreen) {
+      try {
+        const res = await window.athena.enterFullscreen({ kiosk: false });
+        if (!res?.ok) {
+          console.warn('[app] Could not enter fullscreen on exam start:', res?.error);
+        }
+      } catch (err) {
+        console.warn('[app] Error invoking enterFullscreen on exam start:', err);
+      }
+    }
   }
 
-  function handleExitExam() {
+  async function handleExitExam() {
+    // Release locks and restore normal window presentation state
+    if (window.athena?.cancelExamSession) {
+      try {
+        await window.athena.cancelExamSession();
+      } catch (err) {
+        console.warn('[app] Error cancelling exam session:', err);
+      }
+    } else if (window.athena?.restoreNormalState) {
+      try {
+        await window.athena.restoreNormalState();
+      } catch (err) {
+        console.warn('[app] Error restoring normal window state:', err);
+      }
+    }
     setActiveSession(null);
     setExamState('readiness');
   }

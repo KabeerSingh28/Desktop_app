@@ -42,7 +42,10 @@ const {
   validateString,
   validateCandidatePayload,
   validateSessionIdPayload,
+  validateKioskPayload,
   validateSnapshotPayload,
+  isAllowedNavigationUrl,
+  isRestrictedExamShortcut,
 } = require('./ipc-helpers.cjs');
 
 // ---------------------------------------------------------------------------
@@ -175,6 +178,70 @@ function createMainWindow() {
     );
   });
 
+  // Deny all unexpected window popups or target="_blank" window creations
+  mainWindow.webContents.setWindowOpenHandler((details) => {
+    console.warn('[main] Blocked unexpected window popup attempt to:', details.url);
+    return { action: 'deny' };
+  });
+
+  // Strict navigation allowlisting: prevent arbitrary browsing away from the app
+  const distHtmlPath = path.join(__dirname, '..', 'dist', 'index.html');
+  const devServerUrl = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173/';
+
+  mainWindow.webContents.on('will-navigate', (event, navigationUrl) => {
+    const isAllowed = isAllowedNavigationUrl(navigationUrl, {
+      isDev,
+      devServerUrl,
+      distHtmlPath,
+    });
+    if (!isAllowed) {
+      event.preventDefault();
+      console.warn('[main] Blocked unauthorized navigation attempt to:', navigationUrl);
+    }
+  });
+
+  mainWindow.webContents.on('will-redirect', (event, redirectUrl) => {
+    const isAllowed = isAllowedNavigationUrl(redirectUrl, {
+      isDev,
+      devServerUrl,
+      distHtmlPath,
+    });
+    if (!isAllowed) {
+      event.preventDefault();
+      console.warn('[main] Blocked unauthorized redirect attempt to:', redirectUrl);
+    }
+  });
+
+  // Intercept keyboard shortcuts that could reload the page or open DevTools in production
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (isRestrictedExamShortcut(input, { isDev, examInProgress })) {
+      event.preventDefault();
+      console.log(`[main] Intercepted restricted shortcut during exam/production: ${input.key}`);
+    }
+  });
+
+  // Notify the renderer of fullscreen and kiosk state changes
+  function emitWindowState() {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      const state = {
+        isFullScreen: mainWindow.isFullScreen(),
+        isKiosk: mainWindow.isKiosk(),
+      };
+      mainWindow.webContents.send(CHANNELS.WINDOW_STATE_CHANGED, state);
+    }
+  }
+
+  mainWindow.on('enter-full-screen', emitWindowState);
+  mainWindow.on('leave-full-screen', emitWindowState);
+  mainWindow.webContents.on('enter-html-full-screen', emitWindowState);
+  mainWindow.webContents.on('leave-html-full-screen', emitWindowState);
+
+  // Crash recovery: restore normal window state if the renderer crashes
+  mainWindow.webContents.on('render-process-gone', (event, details) => {
+    console.error('[main] Renderer process terminated unexpectedly:', details.reason, details.exitCode);
+    restoreNormalWindowState();
+  });
+
   mainWindow.on('closed', () => { mainWindow = null; });
 }
 
@@ -237,16 +304,49 @@ function registerIpcHandlers() {
     };
   });
 
+  // Helper to safely restore the window to normal non-fullscreen, non-kiosk state
+  function restoreNormalWindowState() {
+    examDeadlineEpoch = null;
+    examInProgress = false;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      try {
+        if (mainWindow.isKiosk()) {
+          mainWindow.setKiosk(false);
+        }
+        if (mainWindow.isFullScreen()) {
+          mainWindow.setFullScreen(false);
+        }
+      } catch (err) {
+        console.warn('[main] Error restoring normal window state:', err.message);
+      }
+    }
+  }
+
   // ── athena:window:enter-fullscreen ────────────────────────────────────────
   /**
-   * Puts the main window into OS fullscreen mode.
-   * Kiosk-level enforcement (no escape, shortcut blocking) will be added in a
-   * later phase; this handler is the stable entry point for it.
+   * Puts the main window into OS fullscreen mode, and optionally kiosk mode.
+   * Returns current window presentation state or error.
    */
-  ipcMain.handle(CHANNELS.WINDOW_ENTER_FULLSCREEN, (event) => {
-    if (!isFromMainWindow(event)) return;
-    if (mainWindow && !mainWindow.isDestroyed()) {
+  ipcMain.handle(CHANNELS.WINDOW_ENTER_FULLSCREEN, (event, payload) => {
+    if (!isFromMainWindow(event)) return { ok: false, error: 'Unauthorized sender' };
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      return { ok: false, error: 'Main window is not available' };
+    }
+    try {
       mainWindow.setFullScreen(true);
+      if (payload && payload.kiosk) {
+        mainWindow.setKiosk(true);
+      }
+      return {
+        ok: true,
+        data: {
+          isFullScreen: mainWindow.isFullScreen(),
+          isKiosk: mainWindow.isKiosk(),
+        },
+      };
+    } catch (err) {
+      console.error('[main] Failed to enter fullscreen/kiosk:', err);
+      return { ok: false, error: `Failed to enter fullscreen: ${err.message}` };
     }
   });
 
@@ -258,11 +358,83 @@ function registerIpcHandlers() {
   ipcMain.handle(CHANNELS.WINDOW_EXIT_FULLSCREEN, (event) => {
     if (!isFromMainWindow(event)) return { ok: false, error: 'Unauthorized sender' };
     if (examInProgress) {
-      return { ok: false, error: 'Cannot exit fullscreen during an active exam' };
+      return { ok: false, error: 'Cannot exit fullscreen during an active exam session' };
     }
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.setFullScreen(false);
+      try {
+        if (mainWindow.isKiosk()) mainWindow.setKiosk(false);
+        mainWindow.setFullScreen(false);
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: `Failed to exit fullscreen: ${err.message}` };
+      }
     }
+    return { ok: true };
+  });
+
+  // ── athena:window:get-state ───────────────────────────────────────────────
+  /**
+   * Returns current window presentation state: isFullScreen and isKiosk.
+   */
+  ipcMain.handle(CHANNELS.WINDOW_GET_STATE, (event) => {
+    if (!isFromMainWindow(event)) return { ok: false, error: 'Unauthorized sender' };
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      return { ok: false, error: 'Main window is not available' };
+    }
+    return {
+      ok: true,
+      data: {
+        isFullScreen: mainWindow.isFullScreen(),
+        isKiosk: mainWindow.isKiosk(),
+      },
+    };
+  });
+
+  // ── athena:window:set-kiosk ───────────────────────────────────────────────
+  /**
+   * Enables or disables kiosk mode on the main window.
+   */
+  ipcMain.handle(CHANNELS.WINDOW_SET_KIOSK, (event, payload) => {
+    if (!isFromMainWindow(event)) return { ok: false, error: 'Unauthorized sender' };
+    try {
+      validateKioskPayload(payload);
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+    if (!payload.enabled && examInProgress) {
+      return { ok: false, error: 'Cannot disable kiosk mode during an active exam session' };
+    }
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      try {
+        mainWindow.setKiosk(payload.enabled);
+        return {
+          ok: true,
+          data: { isKiosk: mainWindow.isKiosk() },
+        };
+      } catch (err) {
+        return { ok: false, error: `Failed to update kiosk mode: ${err.message}` };
+      }
+    }
+    return { ok: false, error: 'Main window is not available' };
+  });
+
+  // ── athena:window:restore-normal ──────────────────────────────────────────
+  /**
+   * Unconditionally restores normal window presentation state.
+   */
+  ipcMain.handle(CHANNELS.WINDOW_RESTORE_NORMAL, (event) => {
+    if (!isFromMainWindow(event)) return { ok: false, error: 'Unauthorized sender' };
+    restoreNormalWindowState();
+    return { ok: true };
+  });
+
+  // ── athena:exam:cancel-session ────────────────────────────────────────────
+  /**
+   * Cancels the active exam session and restores normal window presentation.
+   */
+  ipcMain.handle(CHANNELS.EXAM_CANCEL_SESSION, (event) => {
+    if (!isFromMainWindow(event)) return { ok: false, error: 'Unauthorized sender' };
+    restoreNormalWindowState();
     return { ok: true };
   });
 
@@ -396,9 +568,8 @@ function registerIpcHandlers() {
       throw new Error(`Could not submit exam: ${err.message}`);
     }
 
-    // Clear exam state so exitFullscreen is now permitted
-    examDeadlineEpoch = null;
-    examInProgress = false;
+    // Clear exam state and restore normal window state
+    restoreNormalWindowState();
 
     return result;
   });

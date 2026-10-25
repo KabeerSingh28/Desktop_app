@@ -245,3 +245,33 @@ To resolve the port conflicts between Reference 1 (`6001`) and Reference 2 (`300
     }
   };
   ```
+
+---
+
+## 9. Desktop Fullscreen, Kiosk Controls & Operating System Limitations
+
+### 9.1 Desktop Fullscreen and Kiosk Architecture
+The application coordinates presentation state using Electron's native `BrowserWindow` APIs:
+- **Desktop Fullscreen (`win.setFullScreen(true)`)**: Expands the window to fill the monitor display, hiding OS dock/taskbar chrome where supported.
+- **Optional Kiosk Mode (`win.setKiosk(true)`)**: Enforces kiosk presentation during high-stakes testing sessions.
+- **State Synchronization (`athena:window:state-changed`)**: Listens to Electron native window events (`enter-full-screen`, `leave-full-screen`, `enter-html-full-screen`, `leave-html-full-screen`) and broadcasts real-time `{ isFullScreen, isKiosk }` state to the renderer context.
+- **Safe State Recovery**: On exam submission, cancellation, or unexpected renderer termination (`render-process-gone`), the main process automatically releases kiosk mode and restores normal window dimensions.
+
+### 9.2 Navigation & Shortcut Lockdown Boundary
+To prevent candidates from navigating away from the assessment interface:
+1. **Window Popup Prevention**: `webContents.setWindowOpenHandler` denies all unexpected popup or external window creation attempts (`action: 'deny'`).
+2. **Exact Origin & Path Validation**: `will-navigate` and `will-redirect` reject all targets that do not match the exact Vite dev server origin in development or the exact normalized `dist/index.html` file path in production. Weak string-prefix checks are explicitly avoided.
+3. **Application-Level Shortcut Filtering**: `webContents.on('before-input-event')` suppresses page reloads (`Cmd+R`, `Ctrl+R`, `F5`), printing (`Cmd+P`, `Ctrl+P`), source inspection (`Cmd+U`, `Ctrl+U`, `Cmd+S`), and production DevTools chords (`F12`, `Cmd+Alt+I`, `Ctrl+Shift+I`).
+
+### 9.3 Operating System Limitations & Ethical Safety Boundaries
+> [!IMPORTANT]
+> **Electron Kiosk Mode is NOT an OS-Managed Secure Examination Environment:**
+> Electron applications run in standard user space. While `win.setKiosk(true)` provides an effective barrier against casual multitasking, it does NOT provide the operating-system kernel-level lockdown of specialized enterprise solutions (such as Apple Assessment Mode / Automatic Assessment Configuration API on macOS or Assigned Access / Take a Test on Windows).
+
+**Platform-Specific Behavioral Nuances:**
+- **macOS**: System-level chords (such as Mission Control gestures, Spaces switching, `Cmd+Tab`, and Apple Menu interactions) cannot be completely blocked by Chromium/Electron without OS accessibility privileges or Apple Assessment Configuration MDM profiles.
+- **Windows**: The Secure Attention Sequence (`Ctrl+Alt+Delete`), Windows Key shortcuts, and Task Manager cannot and should not be intercepted by userland Electron processes.
+- **Linux**: Behavior varies across Wayland compositors (Mutter, KWin, Sway) and X11 display servers; some window managers allow switching workspaces even while kiosk mode is active.
+
+**Preservation of Emergency Controls:**
+In accordance with system safety principles, Athena never interferes with emergency system controls (`Cmd+Q` on macOS, OS task-switching/kill controls on Windows/Linux) or disables operating-system security mechanisms. Machine owners can always safely terminate the process if needed.

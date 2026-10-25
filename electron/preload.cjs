@@ -89,22 +89,75 @@ contextBridge.exposeInMainWorld('athena', {
 
   // -------------------------------------------------------------------------
   // Domain: window
-  // Fullscreen is managed by the main process so that kiosk-level enforcement
-  // can be added in a later phase without changing the renderer API.
+  // Fullscreen and kiosk modes are managed by the main process BrowserWindow
+  // APIs so desktop security guarantees and multi-platform quirks are handled
+  // behind a clean, safe promise-based API.
   // -------------------------------------------------------------------------
 
   /**
-   * Requests the main window to enter fullscreen mode.
-   * @returns {Promise<{ ok: boolean }>}
+   * Requests the main window to enter fullscreen mode (and optionally kiosk mode).
+   * @param {{ kiosk?: boolean }} [options]
+   * @returns {Promise<{ ok: boolean, data?: { isFullScreen: boolean, isKiosk: boolean }, error?: string }>}
    */
-  enterFullscreen: () => invoke(CHANNELS.WINDOW_ENTER_FULLSCREEN),
+  enterFullscreen: (options) => {
+    const payload = options && typeof options === 'object' ? { kiosk: Boolean(options.kiosk) } : {};
+    return invoke(CHANNELS.WINDOW_ENTER_FULLSCREEN, payload);
+  },
 
   /**
    * Requests the main window to exit fullscreen mode.
-   * Allowed only after exam submission – enforced by the main process.
+   * Allowed only after exam submission or cancellation – enforced by the main process.
    * @returns {Promise<{ ok: boolean, error?: string }>}
    */
   exitFullscreen: () => invoke(CHANNELS.WINDOW_EXIT_FULLSCREEN),
+
+  /**
+   * Returns current window presentation state: isFullScreen and isKiosk.
+   * @returns {Promise<{ ok: boolean, data?: { isFullScreen: boolean, isKiosk: boolean } }>}
+   */
+  getWindowState: () => invoke(CHANNELS.WINDOW_GET_STATE),
+
+  /**
+   * Enables or disables kiosk mode on the main window.
+   * @param {boolean} enabled
+   * @returns {Promise<{ ok: boolean, data?: { isKiosk: boolean }, error?: string }>}
+   */
+  setKioskMode: (enabled) => {
+    if (typeof enabled !== 'boolean') {
+      return Promise.resolve({ ok: false, error: 'enabled must be a boolean' });
+    }
+    return invoke(CHANNELS.WINDOW_SET_KIOSK, { enabled });
+  },
+
+  /**
+   * Restores the window to normal non-fullscreen, non-kiosk state upon
+   * exam completion, cancellation, or error recovery.
+   * @returns {Promise<{ ok: boolean, error?: string }>}
+   */
+  restoreNormalState: () => invoke(CHANNELS.WINDOW_RESTORE_NORMAL),
+
+  /**
+   * Subscribes to window fullscreen/kiosk presentation state changes pushed
+   * by the main process.
+   * Returns an unsubscribe cleanup function.
+   *
+   * @param {(state: { isFullScreen: boolean, isKiosk: boolean }) => void} callback
+   * @returns {() => void}
+   */
+  onWindowStateChange: (callback) => {
+    if (typeof callback !== 'function') return () => {};
+    const subscription = (_event, state) => {
+      try {
+        callback(state);
+      } catch (err) {
+        console.error('[preload] onWindowStateChange subscriber error:', err);
+      }
+    };
+    ipcRenderer.on(CHANNELS.WINDOW_STATE_CHANGED, subscription);
+    return () => {
+      ipcRenderer.removeListener(CHANNELS.WINDOW_STATE_CHANGED, subscription);
+    };
+  },
 
   // -------------------------------------------------------------------------
   // Domain: exam
@@ -156,6 +209,13 @@ contextBridge.exposeInMainWorld('athena', {
     }
     return invoke(CHANNELS.EXAM_SUBMIT_SESSION, { sessionId: payload.sessionId });
   },
+
+  /**
+   * Cancels the active exam session, restores normal window presentation,
+   * and clears session timers in the main process.
+   * @returns {Promise<{ ok: boolean, error?: string }>}
+   */
+  cancelExamSession: () => invoke(CHANNELS.EXAM_CANCEL_SESSION),
 
   /**
    * Fetches the remaining exam time as computed by the main process clock.

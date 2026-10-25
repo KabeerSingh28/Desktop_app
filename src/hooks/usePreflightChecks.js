@@ -48,26 +48,29 @@ export function usePreflightChecks() {
    */
   const toggleFullscreen = useCallback(async () => {
     try {
-      if (document.fullscreenElement) {
+      if (isFullscreen) {
         if (window.athena?.exitFullscreen) {
           const res = await window.athena.exitFullscreen();
           if (!res.ok) {
-            console.warn('[preflight] IPC exitFullscreen refused:', res.error);
+            console.warn('[preflight] IPC exitFullscreen notice:', res.error);
           }
         } else if (document.exitFullscreen) {
           await document.exitFullscreen();
         }
       } else {
         if (window.athena?.enterFullscreen) {
-          await window.athena.enterFullscreen();
+          const res = await window.athena.enterFullscreen();
+          if (!res.ok) {
+            console.warn('[preflight] IPC enterFullscreen notice:', res.error);
+          }
         } else if (document.documentElement.requestFullscreen) {
           await document.documentElement.requestFullscreen();
         }
       }
     } catch (err) {
-      console.warn('[preflight] Fullscreen toggle error:', err);
+      console.warn('[preflight] Fullscreen toggle error:', err?.message || err);
     }
-  }, []);
+  }, [isFullscreen]);
 
   // 1. Probe backend connectivity upon mount
   useEffect(() => {
@@ -91,7 +94,7 @@ export function usePreflightChecks() {
     };
   }, []);
 
-  // 2. Track fullscreen state changes in real time
+  // 2. Track fullscreen state changes in real time (DOM + Electron IPC bridge)
   useEffect(() => {
     function handleFullscreenChange() {
       setIsFullscreen(Boolean(document.fullscreenElement));
@@ -100,8 +103,28 @@ export function usePreflightChecks() {
     document.addEventListener('fullscreenchange', handleFullscreenChange);
     handleFullscreenChange();
 
+    // Query initial desktop window state if running in Electron
+    if (window.athena?.getWindowState) {
+      window.athena.getWindowState().then((res) => {
+        if (res?.ok && res.data?.isFullScreen) {
+          setIsFullscreen(true);
+        }
+      }).catch(() => {});
+    }
+
+    // Subscribe to IPC window state changes
+    let unsubscribeWindowState = null;
+    if (window.athena?.onWindowStateChange) {
+      unsubscribeWindowState = window.athena.onWindowStateChange((state) => {
+        setIsFullscreen(Boolean(state?.isFullScreen || document.fullscreenElement));
+      });
+    }
+
     return () => {
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      if (typeof unsubscribeWindowState === 'function') {
+        unsubscribeWindowState();
+      }
     };
   }, []);
 

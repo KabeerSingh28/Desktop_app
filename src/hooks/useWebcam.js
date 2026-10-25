@@ -41,21 +41,45 @@ export function useWebcam() {
   // 'unavailable' -> Hardware missing, unplugged, or locked by another app
   // 'unsupported' -> MediaDevices API missing in runtime environment
   // 'ended'       -> Stream unexpectedly terminated (e.g., USB unplugged)
-  const [status, setStatus] = useState('idle');
+  const [, setTick] = useState(0);
+  const triggerRender = useCallback(() => setTick((t) => t + 1), []);
 
-  // Active MediaStream instance
-  const [stream, setStream] = useState(null);
-
-  // Metadata for the active video track
-  const [deviceLabel, setDeviceLabel] = useState(null);
-  const [deviceId, setDeviceId] = useState(null);
-
-  // Categorized error and actionable remedy instructions
-  const [error, setError] = useState(null);
-  const [remedy, setRemedy] = useState(null);
-
-  // Persistent reference to the current MediaStream to prevent race conditions & re-render leaks
+  const statusRef = useRef('idle');
   const streamRef = useRef(null);
+  const deviceLabelRef = useRef(null);
+  const deviceIdRef = useRef(null);
+  const errorRef = useRef(null);
+  const remedyRef = useRef(null);
+
+  const updateStatus = useCallback((s) => {
+    statusRef.current = s;
+    triggerRender();
+  }, [triggerRender]);
+
+  const updateStream = useCallback((st) => {
+    streamRef.current = st;
+    triggerRender();
+  }, [triggerRender]);
+
+  const updateError = useCallback((e) => {
+    errorRef.current = e;
+    triggerRender();
+  }, [triggerRender]);
+
+  const updateRemedy = useCallback((r) => {
+    remedyRef.current = r;
+    triggerRender();
+  }, [triggerRender]);
+
+  const updateDeviceLabel = useCallback((l) => {
+    deviceLabelRef.current = l;
+    triggerRender();
+  }, [triggerRender]);
+
+  const updateDeviceId = useCallback((id) => {
+    deviceIdRef.current = id;
+    triggerRender();
+  }, [triggerRender]);
 
   // References to event listeners for clean detachment
   const listenersRef = useRef(null);
@@ -92,10 +116,10 @@ export function useWebcam() {
       streamRef.current = null;
     }
 
-    setStream(null);
-    setDeviceLabel(null);
-    setDeviceId(null);
-  }, []);
+    updateStream(null);
+    updateDeviceLabel(null);
+    updateDeviceId(null);
+  }, [updateDeviceId, updateDeviceLabel, updateStream]);
 
   /**
    * Handles unexpected video track termination (e.g., USB camera unplugged,
@@ -104,10 +128,10 @@ export function useWebcam() {
   const handleTrackEnded = useCallback((track) => {
     console.warn('[useWebcam] Video track ended unexpectedly:', track?.label || 'Camera');
     cleanupStream();
-    setStatus('ended');
-    setError('Webcam feed was disconnected or terminated unexpectedly.');
-    setRemedy('Please ensure your camera is securely connected and click "Retry Access".');
-  }, [cleanupStream]);
+    updateStatus('ended');
+    updateError('Webcam feed was disconnected or terminated unexpectedly.');
+    updateRemedy('Please ensure your camera is securely connected and click "Retry Access".');
+  }, [cleanupStream, updateError, updateRemedy, updateStatus]);
 
   /**
    * Requests camera access via navigator.mediaDevices.getUserMedia.
@@ -120,29 +144,29 @@ export function useWebcam() {
   const requestCamera = useCallback(async (customConstraints) => {
     // 1. Verify environment support for MediaDevices
     if (!navigator?.mediaDevices?.getUserMedia) {
-      setStatus('unsupported');
-      setError('MediaDevices.getUserMedia is not supported in this runtime environment.');
-      setRemedy('Please run Athena inside the supported desktop application.');
+      updateStatus('unsupported');
+      updateError('MediaDevices.getUserMedia is not supported in this runtime environment.');
+      updateRemedy('Please run Athena inside the supported desktop application.');
       return null;
     }
 
     // 2. Avoid requesting a new stream repeatedly if an existing valid stream is live
     if (isStreamLive(streamRef.current)) {
       const activeTrack = streamRef.current.getVideoTracks()[0];
-      setStatus('granted');
-      setStream(streamRef.current);
-      setDeviceLabel(activeTrack?.label || 'Default Camera Device');
-      setError(null);
-      setRemedy(null);
+      updateStatus('granted');
+      updateStream(streamRef.current);
+      updateDeviceLabel(activeTrack?.label || 'Default Camera Device');
+      updateError(null);
+      updateRemedy(null);
       return streamRef.current;
     }
 
     // 3. Clean up any previous dead or stale stream before requesting a fresh one
     cleanupStream();
 
-    setStatus('checking');
-    setError(null);
-    setRemedy(null);
+    updateStatus('checking');
+    updateError(null);
+    updateRemedy(null);
 
     try {
       // Secure constraints: standard resolution, user-facing, strictly NO audio/microphone
@@ -158,13 +182,12 @@ export function useWebcam() {
       const constraints = customConstraints || defaultConstraints;
       const newStream = await navigator.mediaDevices.getUserMedia(constraints);
 
-      streamRef.current = newStream;
-      setStream(newStream);
+      updateStream(newStream);
 
       const track = newStream.getVideoTracks()[0];
       if (track) {
-        setDeviceLabel(track.label || 'Default Camera Device');
-        setDeviceId(track.getSettings?.()?.deviceId || null);
+        updateDeviceLabel(track.label || 'Default Camera Device');
+        updateDeviceId(track.getSettings?.()?.deviceId || null);
 
         // Attach event listeners for unexpected termination and mute events
         const handleEnded = () => handleTrackEnded(track);
@@ -182,29 +205,38 @@ export function useWebcam() {
         listenersRef.current = { track, handleEnded, handleMute, handleUnmute };
       }
 
-      setStatus('granted');
-      setError(null);
-      setRemedy(null);
+      updateStatus('granted');
+      updateError(null);
+      updateRemedy(null);
       return newStream;
     } catch (err) {
       const classified = evaluateCameraError(err);
-      setStatus(classified.status);
-      setError(classified.message);
-      setRemedy(classified.remedy);
+      updateStatus(classified.status);
+      updateError(classified.message);
+      updateRemedy(classified.remedy);
       cleanupStream();
       return null;
     }
-  }, [cleanupStream, handleTrackEnded]);
+  }, [
+    cleanupStream,
+    handleTrackEnded,
+    updateDeviceId,
+    updateDeviceLabel,
+    updateError,
+    updateRemedy,
+    updateStatus,
+    updateStream,
+  ]);
 
   /**
    * Explicitly stops all tracks, resets state to 'idle', and turns off the camera LED.
    */
   const stopCamera = useCallback(() => {
     cleanupStream();
-    setStatus('idle');
-    setError(null);
-    setRemedy(null);
-  }, [cleanupStream]);
+    updateStatus('idle');
+    updateError(null);
+    updateRemedy(null);
+  }, [cleanupStream, updateError, updateRemedy, updateStatus]);
 
   /**
    * Controlled retry/reinitialization flow.
@@ -259,14 +291,29 @@ export function useWebcam() {
   }, [cleanupStream]);
 
   return {
-    status,
-    stream,
-    deviceLabel,
-    deviceId,
-    error,
-    remedy,
-    isLive: isStreamLive(stream),
+    get status() {
+      return statusRef.current;
+    },
+    get stream() {
+      return streamRef.current;
+    },
+    get deviceLabel() {
+      return deviceLabelRef.current;
+    },
+    get deviceId() {
+      return deviceIdRef.current;
+    },
+    get error() {
+      return errorRef.current;
+    },
+    get remedy() {
+      return remedyRef.current;
+    },
+    get isLive() {
+      return isStreamLive(streamRef.current);
+    },
     requestCamera,
+    startCamera: requestCamera,
     stopCamera,
     restartCamera,
   };

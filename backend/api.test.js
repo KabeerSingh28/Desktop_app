@@ -657,5 +657,51 @@ describe('Athena Backend Exam API', () => {
       expect(data.error).toContain('already submitted');
     });
   });
+
+  // -------------------------------------------------------------------------
+  // 7. Edge Cases & Resilience
+  // -------------------------------------------------------------------------
+  describe('Edge Cases & Centralized Error Handling', () => {
+    it('allows submitting an exam session with 0 answered questions', async () => {
+      const startRes = await fetch(`${baseUrl}/exam/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: 'empty-submit-user', name: 'Zero Attempt' }),
+      });
+      const { sessionId } = await startRes.json();
+
+      const submitRes = await fetch(`${baseUrl}/exam/submit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId }),
+      });
+
+      expect(submitRes.status).toBe(200);
+      const data = await submitRes.json();
+      expect(data.result.attempted).toBe(0);
+      expect(data.result.correct).toBe(0);
+      expect(data.result.wrong).toBe(0);
+      expect(data.result.totalQuestions).toBe(5);
+    });
+
+    it('returns structured 404 JSON for unknown routes', async () => {
+      const res = await fetch(`${baseUrl}/api/unknown-endpoint`);
+      expect(res.status).toBe(404);
+      const body = await res.json();
+      expect(body.error).toContain('Route GET /api/unknown-endpoint not found');
+    });
+
+    it('returns structured error JSON when receiving malformed JSON payload', async () => {
+      const res = await fetch(`${baseUrl}/exam/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{"userId": invalid-json',
+      });
+      expect(res.status).toBeGreaterThanOrEqual(400);
+      const body = await res.json();
+      expect(body.error).toBeDefined();
+    });
+  });
 });
+
 

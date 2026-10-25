@@ -26,20 +26,21 @@ export function useProctoringEvents({
   cameraError = null,
   backendConnected = true,
 } = {}) {
-  const [events, setEvents] = useState([]);
+  const [, setEventsTick] = useState(0);
+  const triggerRender = useCallback(() => setEventsTick((t) => t + 1), []);
+  const eventsRef = useRef([]);
   const prevCameraStatus = useRef(cameraStatus);
   const prevBackendConnected = useRef(backendConnected);
 
   // Safely append an event without duplicates
   const addEvent = useCallback((event) => {
     if (!event || !event.eventId) return;
-    setEvents((prev) => {
-      if (prev.some((e) => e.eventId === event.eventId)) {
-        return prev;
-      }
-      return [...prev, event];
-    });
-  }, []);
+    if (eventsRef.current.some((e) => e.eventId === event.eventId)) {
+      return;
+    }
+    eventsRef.current = [...eventsRef.current, event];
+    triggerRender();
+  }, [triggerRender]);
 
   /**
    * Records a structured proctoring event.
@@ -120,7 +121,8 @@ export function useProctoringEvents({
         try {
           const res = await window.athena.getProctorEvents(sessionId);
           if (isMounted && res?.ok && Array.isArray(res?.data)) {
-            setEvents(res.data);
+            eventsRef.current = res.data;
+            triggerRender();
             return;
           }
         } catch {
@@ -133,7 +135,8 @@ export function useProctoringEvents({
         if (response.ok) {
           const data = await response.json();
           if (isMounted && Array.isArray(data?.events)) {
-            setEvents(data.events);
+            eventsRef.current = data.events;
+            triggerRender();
           }
         }
       } catch (err) {
@@ -146,7 +149,7 @@ export function useProctoringEvents({
     return () => {
       isMounted = false;
     };
-  }, [sessionId, active]);
+  }, [sessionId, active, triggerRender]);
 
   // Monitor DOM visibility changes (window minimized, tab switched)
   useEffect(() => {
@@ -242,11 +245,14 @@ export function useProctoringEvents({
   }, [backendConnected, active, sessionId, recordEvent]);
 
   const clearEvents = useCallback(() => {
-    setEvents([]);
-  }, []);
+    eventsRef.current = [];
+    triggerRender();
+  }, [triggerRender]);
 
   return {
-    events,
+    get events() {
+      return eventsRef.current;
+    },
     recordEvent,
     clearEvents,
   };

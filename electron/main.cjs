@@ -46,6 +46,7 @@ const {
   validateSnapshotPayload,
   validateVideoChunkPayload,
   sanitizePathSegment,
+  calculateRemainingTime,
   validateProctorEventPayload,
   EventDeduplicator,
   isAllowedNavigationUrl,
@@ -573,6 +574,13 @@ function registerIpcHandlers() {
     if (!isFromMainWindow(event)) throw new Error('Unauthorized sender');
     validateCandidatePayload(payload);
 
+    // Prevent duplicate active sessions: reject if an exam is already in progress
+    if (examInProgress && activeSessionId) {
+      throw new Error(
+        `An examination session (${activeSessionId}) is already in progress. Please submit or cancel it before starting a new session.`
+      );
+    }
+
     const BACKEND_PORT = process.env.EXAM_BACKEND_PORT || 6001;
     const baseUrl = `http://localhost:${BACKEND_PORT}`;
 
@@ -630,8 +638,7 @@ function registerIpcHandlers() {
    */
   ipcMain.handle(CHANNELS.EXAM_GET_REMAINING_TIME, (event) => {
     if (!isFromMainWindow(event)) return 0;
-    if (examDeadlineEpoch === null) return 0;
-    return Math.max(0, examDeadlineEpoch - Date.now());
+    return calculateRemainingTime(examDeadlineEpoch);
   });
 
   // ── athena:exam:submit-session ────────────────────────────────────────────

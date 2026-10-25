@@ -108,6 +108,22 @@ function validateKioskPayload(payload) {
 }
 
 /**
+ * Calculates remaining exam time in milliseconds given a deadline epoch.
+ * Clamps result at 0 so it never produces negative values or NaN.
+ *
+ * @param {number} deadlineEpoch - Target deadline in milliseconds (epoch)
+ * @param {number} [currentEpoch=Date.now()] - Current epoch in milliseconds
+ * @returns {number} Non-negative integer of milliseconds remaining
+ */
+function calculateRemainingTime(deadlineEpoch, currentEpoch = Date.now()) {
+  if (typeof deadlineEpoch !== 'number' || !Number.isFinite(deadlineEpoch) || deadlineEpoch <= 0) {
+    return 0;
+  }
+  const diff = deadlineEpoch - currentEpoch;
+  return diff > 0 ? Math.floor(diff) : 0;
+}
+
+/**
  * Sanitizes a directory or file path segment to eliminate directory traversal
  * attacks (e.g. "../", absolute paths, null bytes) and special filesystem characters.
  *
@@ -440,6 +456,7 @@ module.exports = {
   validateSnapshotPayload,
   validateVideoChunkPayload,
   sanitizePathSegment,
+  calculateRemainingTime,
   validateProctorEventPayload,
   EventDeduplicator,
   isAllowedNavigationUrl,

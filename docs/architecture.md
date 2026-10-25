@@ -343,3 +343,52 @@ When continuous video recording is explicitly configured:
 - **Memory Safety & Zero Content Logging**: Image binary buffers and base64 strings are never logged to console, error logs, or audit records.
 - **No Biometric Analysis**: Athena explicitly refrains from facial recognition, gaze tracking, emotion detection, or automated cheating scores.
 
+---
+
+## 12. Verification & Testing Strategy: Automated vs. Physical Hardware Tests
+
+Athena utilizes a dual-tier verification strategy distinguishing between deterministic automated regression tests and real-world manual physical hardware validations.
+
+### 12.1 Deterministic Automated Test Suites (168 Tests Passing)
+Automated suites run via Vitest in isolated environments with zero hardware dependencies:
+1. **Backend API & Edge Cases (`backend/api.test.js`)**:
+   - Exam session creation, question sanitization (ensuring `correctAnswer` is never leaked), answer submission, and scoring.
+   - Rejection of duplicate answer submissions (HTTP 409), invalid question indices, non-existent sessions, and post-submission lockdowns.
+   - Edge case resilience: sessions submitted with 0 answered questions, structured 404 JSON for unknown routes, and syntax error recovery for malformed payloads.
+2. **Storage Engine Resilience (`backend/storage.test.js`)**:
+   - Automatic defaults recovery when `questions.json` is missing or corrupted with malformed JSON.
+   - Safe empty array initialization when `sessions.json` is missing or unreadable.
+   - Concurrent write safety using serialized write queue locks.
+3. **IPC Contracts & Deduplication (`electron/ipc.test.js`)**:
+   - Strict string sanitization, directory traversal guards, data URL format validation, and size limits (512KB snapshot cap).
+   - Remaining time calculation clamped at 0 (preventing negative millisecond timers).
+   - `EventDeduplicator` stateful pair filtering and 400ms debounce throttling.
+   - Keyboard shortcut filtering (suppressing DevTools, reload, and print shortcuts while preserving OS emergency exit keys).
+4. **Webcam Lifecycle Management (`src/hooks/useWebcam.test.js` & `src/utils/cameraUtils.test.js`)**:
+   - Idempotent stream reuse across component re-renders.
+   - Accurate classification of OS permissions errors (`NotAllowedError` -> `denied`), missing hardware (`NotFoundError` -> `unavailable`), and device busy locks (`NotReadableError` -> `unavailable`).
+   - Track-level listener attachment and deterministic track termination.
+   - Canvas fallback when `ImageCapture` fails.
+5. **Evidence Capture & Telemetry (`src/hooks/useEvidenceCapture.test.js` & `src/hooks/useProctoringEvents.test.js`)**:
+   - Consent gating preventing capture prior to explicit consent.
+   - In-flight mutex protection suppressing overlapping snapshot requests.
+   - Proctoring event schema enforcement and bidirectional IPC/HTTP event bridging.
+
+### 12.2 Manual Tests Requiring Physical Hardware / OS Environment
+The following test scenarios directly interact with native operating system window managers, graphics drivers, and physical peripherals, requiring execution on real devices:
+1. **Physical Peripheral Disconnection**:
+   - *Test Procedure*: Unplug an external USB webcam or disable camera device in Device Manager during an active exam.
+   - *Expected Behavior*: The hardware indicator LED turns off, `useWebcam` catches the track `'ended'` event, logs a `camera:terminated` proctoring event, and the UI displays the inline "Reconnect" button.
+2. **macOS Mission Control & Spaces Gestures**:
+   - *Test Procedure*: Perform a 3-finger swipe up or switch virtual desktops while in active kiosk/fullscreen mode.
+   - *Expected Behavior*: Window manager attempts to switch spaces; main process catches `blur` event, logs `window:blur`, and requests focus back to the assessment window.
+3. **Multi-Monitor Display Trapping**:
+   - *Test Procedure*: Connect multiple physical monitors via HDMI/DisplayPort and initiate an exam session.
+   - *Expected Behavior*: Primary monitor enters kiosk mode; secondary monitors either blank out or show the lock screen, preventing cursor escape or hidden browser inspection.
+4. **Physical Network Cable Pull / Wi-Fi Toggle**:
+   - *Test Procedure*: Disconnect internet connection immediately prior to clicking "Submit & Complete Assessment".
+   - *Expected Behavior*: UI displays the prominent red "Submission Encountered an Error" alert card with the "Retry Submission" button; clicking retry after reconnecting successfully finalizes the session without candidate lockout.
+5. **Emergency OS Exit Key Combinations**:
+   - *Test Procedure*: Press Cmd+Q (macOS) or Alt+F4 / Ctrl+Alt+Del (Windows).
+   - *Expected Behavior*: Emergency OS escape commands are deliberately NOT intercepted by application shortcut filters, allowing the device owner to safely regain host control.
+

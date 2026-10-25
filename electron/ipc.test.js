@@ -23,6 +23,7 @@ import {
   validateCandidatePayload,
   validateSessionIdPayload,
   validateKioskPayload,
+  calculateRemainingTime,
   validateProctorEventPayload,
   EventDeduplicator,
   isAllowedNavigationUrl,
@@ -277,6 +278,31 @@ describe('validateVideoChunkPayload', () => {
     expect(() =>
       validateVideoChunkPayload({ sessionId: 'sess-1' })
     ).toThrow(/chunk must be a base64 string or binary buffer/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// calculateRemainingTime
+// ---------------------------------------------------------------------------
+describe('calculateRemainingTime', () => {
+  it('returns positive remaining milliseconds when deadline is in the future', () => {
+    const now = 1000000;
+    const deadline = now + 45 * 60 * 1000; // 45 minutes
+    expect(calculateRemainingTime(deadline, now)).toBe(45 * 60 * 1000);
+  });
+
+  it('clamps at 0 when current time equals or exceeds deadline', () => {
+    const now = 1000000;
+    expect(calculateRemainingTime(now, now)).toBe(0);
+    expect(calculateRemainingTime(now - 5000, now)).toBe(0);
+  });
+
+  it('returns 0 for non-numeric, null, undefined, or non-finite deadline values', () => {
+    expect(calculateRemainingTime(null)).toBe(0);
+    expect(calculateRemainingTime(undefined)).toBe(0);
+    expect(calculateRemainingTime(NaN)).toBe(0);
+    expect(calculateRemainingTime(-1000)).toBe(0);
+    expect(calculateRemainingTime('invalid')).toBe(0);
   });
 });
 

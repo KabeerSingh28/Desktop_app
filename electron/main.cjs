@@ -157,6 +157,53 @@ function restoreNormalWindowState() {
 }
 
 // ---------------------------------------------------------------------------
+// Embedded Backend Server Management
+// ---------------------------------------------------------------------------
+let embeddedServer = null;
+
+async function initBackendServer() {
+  const BACKEND_PORT = Number(process.env.PORT || process.env.EXAM_BACKEND_PORT || 6001);
+
+  // 1. If an active backend is already detected on this port, reuse it
+  try {
+    const res = await fetch(`http://localhost:${BACKEND_PORT}/`);
+    if (res.ok) {
+      console.log(`[main] Existing backend detected on port ${BACKEND_PORT}`);
+      return;
+    }
+  } catch {
+    // Port inactive; launch embedded server
+  }
+
+  // 2. Configure safe writable storage path for production
+  // Packaged applications cannot write to app.asar, so we persist to userData/data
+  if (!process.env.DATA_DIR && !isDev) {
+    process.env.DATA_DIR = path.join(app.getPath('userData'), 'data');
+  }
+
+  try {
+    const { createApp } = await import('../backend/app.js');
+    const { ensureDataDir } = await import('../backend/storage.js');
+
+    await ensureDataDir(process.env.DATA_DIR);
+    const expressApp = createApp();
+
+    await new Promise((resolve) => {
+      embeddedServer = expressApp.listen(BACKEND_PORT, () => {
+        console.log(`[main] Embedded Express backend running at http://localhost:${BACKEND_PORT}`);
+        resolve();
+      });
+      embeddedServer.on('error', (err) => {
+        console.warn(`[main] Embedded backend notice (${err.code}):`, err.message);
+        resolve();
+      });
+    });
+  } catch (err) {
+    console.error('[main] Could not initialize embedded backend:', err.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Single-instance lock
 // ---------------------------------------------------------------------------
 const gotTheLock = app.requestSingleInstanceLock();
@@ -174,7 +221,8 @@ if (!gotTheLock) {
   });
 
   // Main entry point
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
+    await initBackendServer();
     registerIpcHandlers();
     createMainWindow();
 
@@ -192,6 +240,17 @@ if (!gotTheLock) {
     dialog.showErrorBox('Initialization Error', `Failed to start Athena:\n${err.message}`);
   });
 }
+
+app.on('before-quit', () => {
+  if (embeddedServer) {
+    try {
+      embeddedServer.close();
+      embeddedServer = null;
+    } catch {
+      // Ignore
+    }
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Window creation

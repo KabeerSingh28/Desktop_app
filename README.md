@@ -75,19 +75,18 @@ Run Electron pointing directly to the compiled static assets in `dist/index.html
 npm run start:prod
 ```
 
-### 3.3 Package Desktop Application
-Package the application into an unpacked native directory for verification:
+### 3.3 Build macOS Distributable DMG Installer
+Generate the distributable `.dmg` disk image with an embedded `/Applications` drag-and-drop installer:
 ```bash
-npm run package
-# macOS: outputs unpacked bundle to release/mac-arm64/Athena.app
+npm run build:dmg
 ```
+- **Output Artifact**: `release/Athena-1.0.0-arm64.dmg` (or `release/Athena-1.0.0-x64.dmg` on Intel Macs).
+- **Application Icon**: Uses `electron/assets/icon.icns` for the volume icon and native `.app` bundle.
+- **Embedded Backend Handling**: The packaged desktop app does **not** require any external terminal or local development server. When `Athena.app` is launched, Electron automatically starts the bundled Express backend on port `6001` and configures a safe, writable persistence path under `app.getPath('userData')/data` (bypassing read-only ASAR constraints).
 
-To build distribution installers (.dmg on macOS):
-```bash
-npm run dist:mac
-# or
-npm run dist
-```
+### 3.4 Packaging & DMG Limitations
+- **Apple Developer ID Code Signing**: Unsigned DMG builds will show a standard macOS Gatekeeper alert ("Athena cannot be opened because Apple cannot check it for malicious software") on other machines until signed and notarized with an active Apple Developer ID certificate. To open on test machines: right-click `Athena.app` $\rightarrow$ click **Open** $\rightarrow$ click **Open**.
+- **Cross-Compilation**: macOS DMGs must be generated on a macOS host. Building Windows (`.exe` / `.msi`) or Linux (`.AppImage` / `.deb`) from macOS requires target-specific toolchains.
 
 ---
 

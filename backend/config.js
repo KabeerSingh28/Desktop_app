@@ -12,10 +12,17 @@ const __dirname = path.dirname(__filename);
 
 export const config = {
   // Configurable port: checks PORT or EXAM_BACKEND_PORT, defaulting to 6001
-  port: Number(process.env.PORT || process.env.EXAM_BACKEND_PORT || 6001),
+  get port() {
+    return Number(process.env.PORT || process.env.EXAM_BACKEND_PORT || 6001);
+  },
 
-  // Configurable data storage directory (can be overridden in tests via DATA_DIR)
-  dataDir: process.env.DATA_DIR || path.join(__dirname, 'data'),
+  // Configurable data storage directory (can be overridden in tests or production via DATA_DIR)
+  get dataDir() {
+    return process.env.DATA_DIR || path.join(__dirname, 'data');
+  },
+  set dataDir(val) {
+    process.env.DATA_DIR = val;
+  },
 
   // Default MCQ questions used for initialization or fallback recovery
   defaultQuestions: [

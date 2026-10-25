@@ -1,1 +1,43 @@
-node_modules
+# =============================================================================
+# Athena Desktop Examination & Proctoring Application - Git Ignore
+# =============================================================================
+
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Production and distribution build artifacts
+dist/
+release/
+out/
+dist-electron/
+build/
+
+# Local environment configuration and credentials
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Operating system metadata
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs, test coverage, and runtime temporary files
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+coverage/
+.nyc_output/
+
+# Temporary atomic files from backend storage
+*.tmp.*

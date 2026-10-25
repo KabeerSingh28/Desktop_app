@@ -1,101 +1,28 @@
 /**
  * Custom Hook: usePreflightChecks
  *
- * Encapsulates the complete preflight verification lifecycle:
- * 1. Camera availability, Permissions API status query, and getUserMedia acquisition.
- * 2. Backend health monitoring and latency ping.
- * 3. Window fullscreen tracking via DOM events and Electron IPC bridge.
- * 4. Safe cleanup of media stream tracks upon unmount.
+ * Coordinates system-wide preflight checks by composing:
+ * 1. Dedicated webcam lifecycle management via useWebcam.
+ * 2. Authoritative backend service health and latency probing.
+ * 3. Fullscreen mode tracking across Electron IPC and standard DOM APIs.
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { API_BASE_URL } from '../config.js';
-import {
-  evaluateCameraError,
-  checkBackendHealth,
-} from '../utils/preflightHelpers.js';
+import { checkBackendHealth } from '../utils/preflightHelpers.js';
+import { useWebcam } from './useWebcam.js';
 
 export function usePreflightChecks() {
-  // Camera state
-  const [cameraStatus, setCameraStatus] = useState('checking'); // 'checking' | 'idle' | 'granted' | 'denied' | 'unavailable' | 'unsupported'
-  const [cameraStream, setCameraStream] = useState(null);
-  const [cameraDeviceLabel, setCameraDeviceLabel] = useState(null);
-  const [cameraError, setCameraError] = useState(null);
-  const [cameraRemedy, setCameraRemedy] = useState(null);
+  // Delegate all camera stream ownership, detection, and cleanup to useWebcam
+  const camera = useWebcam();
 
-  // Backend state
+  // Backend service connectivity state
   const [backendStatus, setBackendStatus] = useState('checking'); // 'checking' | 'connected' | 'disconnected'
   const [backendLatency, setBackendLatency] = useState(null);
   const [backendError, setBackendError] = useState(null);
 
   // Fullscreen state
   const [isFullscreen, setIsFullscreen] = useState(false);
-
-  // Keep ref to stream for cleanup without triggering re-renders
-  const streamRef = useRef(null);
-
-  /**
-   * Safely stops all active media tracks.
-   */
-  const stopCamera = useCallback(() => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => {
-        try {
-          track.stop();
-        } catch (e) {
-          console.warn('[preflight] Error stopping track:', e);
-        }
-      });
-      streamRef.current = null;
-    }
-    setCameraStream(null);
-    setCameraDeviceLabel(null);
-  }, []);
-
-  /**
-   * Requests camera access using the standard getUserMedia API.
-   * Catches and classifies any DOMExceptions.
-   */
-  const requestCamera = useCallback(async () => {
-    if (!navigator?.mediaDevices?.getUserMedia) {
-      setCameraStatus('unsupported');
-      setCameraError('Your current environment does not support MediaDevices.getUserMedia.');
-      setCameraRemedy('Please ensure you are running the Athena desktop application or a modern Chromium browser.');
-      return;
-    }
-
-    setCameraStatus('checking');
-    setCameraError(null);
-    setCameraRemedy(null);
-
-    // Stop existing stream if any before acquiring a new one
-    stopCamera();
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: 640 },
-          height: { ideal: 480 },
-        },
-        audio: false, // Microphone is explicitly NOT requested
-      });
-
-      streamRef.current = stream;
-      setCameraStream(stream);
-
-      const track = stream.getVideoTracks()[0];
-      setCameraDeviceLabel(track?.label || 'Default Camera Device');
-      setCameraStatus('granted');
-      setCameraError(null);
-      setCameraRemedy(null);
-    } catch (err) {
-      const evaluation = evaluateCameraError(err);
-      setCameraStatus(evaluation.status);
-      setCameraError(evaluation.message);
-      setCameraRemedy(evaluation.remedy);
-      stopCamera();
-    }
-  }, [stopCamera]);
 
   /**
    * Pings the backend health endpoint.
@@ -142,67 +69,35 @@ export function usePreflightChecks() {
     }
   }, []);
 
-  // 1. Check initial permissions & probe backend on mount
+  // 1. Probe backend connectivity upon mount
   useEffect(() => {
     let isMounted = true;
 
-    async function initialProbe() {
-      // Preliminary check via Permissions API where supported
-      if (navigator.permissions && typeof navigator.permissions.query === 'function') {
-        try {
-          const status = await navigator.permissions.query({ name: 'camera' });
-          if (isMounted) {
-            if (status.state === 'granted') {
-              // Automatically activate stream if permission was previously granted
-              requestCamera();
-            } else if (status.state === 'denied') {
-              setCameraStatus('denied');
-              setCameraError('Camera access was previously denied in system/browser privacy settings.');
-              setCameraRemedy('Please grant camera access in OS Privacy Settings and click "Retry Access".');
-            } else {
-              setCameraStatus('idle');
-            }
-
-            status.onchange = () => {
-              if (!isMounted) return;
-              if (status.state === 'granted') {
-                requestCamera();
-              } else if (status.state === 'denied') {
-                setCameraStatus('denied');
-                setCameraError('Camera access was denied.');
-                stopCamera();
-              }
-            };
-          }
-        } catch {
-          // Permissions API query for camera is not supported in this runtime
-          if (isMounted) setCameraStatus('idle');
-        }
+    checkBackendHealth(API_BASE_URL).then((result) => {
+      if (!isMounted) return;
+      if (result.ok) {
+        setBackendStatus('connected');
+        setBackendLatency(result.latencyMs);
+        setBackendError(null);
       } else {
-        if (isMounted) setCameraStatus('idle');
+        setBackendStatus('disconnected');
+        setBackendLatency(null);
+        setBackendError(result.error);
       }
-
-      // Check backend
-      if (isMounted) {
-        checkBackend();
-      }
-    }
-
-    initialProbe();
+    });
 
     return () => {
       isMounted = false;
     };
-  }, [requestCamera, checkBackend, stopCamera]);
+  }, []);
 
-  // 2. Track fullscreen state changes
+  // 2. Track fullscreen state changes in real time
   useEffect(() => {
     function handleFullscreenChange() {
       setIsFullscreen(Boolean(document.fullscreenElement));
     }
 
     document.addEventListener('fullscreenchange', handleFullscreenChange);
-    // Initial sync
     handleFullscreenChange();
 
     return () => {
@@ -210,23 +105,8 @@ export function usePreflightChecks() {
     };
   }, []);
 
-  // 3. Cleanup camera on unmount
-  useEffect(() => {
-    return () => {
-      stopCamera();
-    };
-  }, [stopCamera]);
-
   return {
-    camera: {
-      status: cameraStatus,
-      stream: cameraStream,
-      deviceLabel: cameraDeviceLabel,
-      error: cameraError,
-      remedy: cameraRemedy,
-      requestCamera,
-      stopCamera,
-    },
+    camera,
     backend: {
       status: backendStatus,
       latencyMs: backendLatency,

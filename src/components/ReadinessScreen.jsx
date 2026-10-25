@@ -36,9 +36,23 @@ export function ReadinessScreen({ onStartExam }) {
 
   // Bind camera stream to video preview element when stream changes
   useEffect(() => {
-    if (videoRef.current && camera.stream) {
-      videoRef.current.srcObject = camera.stream;
+    const videoEl = videoRef.current;
+    if (!videoEl) return;
+
+    if (camera.stream) {
+      videoEl.srcObject = camera.stream;
+      videoEl.play().catch((err) => {
+        console.warn('[readiness] video.play() notice:', err?.message || err);
+      });
+    } else {
+      videoEl.srcObject = null;
     }
+
+    return () => {
+      if (videoEl) {
+        videoEl.srcObject = null;
+      }
+    };
   }, [camera.stream]);
 
   // Evaluate readiness to start
@@ -204,16 +218,17 @@ export function ReadinessScreen({ onStartExam }) {
                   ) : (
                     <button
                       type="button"
-                      onClick={camera.requestCamera}
-                      className="px-3 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition"
+                      onClick={() => camera.requestCamera()}
+                      disabled={camera.status === 'checking'}
+                      className="px-3 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition disabled:opacity-50"
                     >
                       {camera.status === 'checking' ? 'Connecting...' : 'Enable Camera'}
                     </button>
                   )}
                   <button
                     type="button"
-                    onClick={camera.requestCamera}
-                    title="Retest camera hardware"
+                    onClick={() => camera.restartCamera()}
+                    title="Retest or reconnect camera hardware"
                     className="p-1.5 text-slate-500 hover:text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg transition"
                   >
                     ↻
@@ -232,6 +247,19 @@ export function ReadinessScreen({ onStartExam }) {
                       muted
                       className="w-full h-full object-cover scale-x-[-1]"
                     />
+                  ) : camera.status === 'ended' ? (
+                    <div className="text-center p-6 space-y-2 text-slate-400">
+                      <div className="text-2xl">⚠️</div>
+                      <p className="text-xs font-semibold text-red-400">Webcam Disconnected</p>
+                      <p className="text-[11px] text-slate-400">The video track was terminated unexpectedly.</p>
+                      <button
+                        type="button"
+                        onClick={() => camera.restartCamera()}
+                        className="mt-2 px-3 py-1 bg-red-600 hover:bg-red-700 text-white text-xs font-semibold rounded shadow-xs transition"
+                      >
+                        Reconnect Camera
+                      </button>
+                    </div>
                   ) : (
                     <div className="text-center p-6 space-y-2 text-slate-400">
                       <div className="text-2xl">📷</div>
@@ -242,6 +270,11 @@ export function ReadinessScreen({ onStartExam }) {
                           ? 'No webcam detected'
                           : 'Camera preview is currently inactive'}
                       </p>
+                      {camera.status === 'idle' && (
+                        <p className="text-[11px] text-slate-500">
+                          Click &quot;Enable Camera&quot; to test your webcam feed
+                        </p>
+                      )}
                     </div>
                   )}
 
@@ -530,6 +563,7 @@ export function ReadinessScreen({ onStartExam }) {
 function CameraStatusBadge({ status }) {
   switch (status) {
     case 'granted':
+    case 'active':
       return <span className="px-2 py-0.5 text-[11px] font-semibold bg-emerald-100 text-emerald-800 rounded-md">✓ Ready</span>;
     case 'denied':
       return <span className="px-2 py-0.5 text-[11px] font-semibold bg-red-100 text-red-800 rounded-md">✕ Denied</span>;
@@ -537,8 +571,10 @@ function CameraStatusBadge({ status }) {
       return <span className="px-2 py-0.5 text-[11px] font-semibold bg-amber-100 text-amber-800 rounded-md">! No Device</span>;
     case 'unsupported':
       return <span className="px-2 py-0.5 text-[11px] font-semibold bg-slate-200 text-slate-700 rounded-md">Unsupported</span>;
+    case 'ended':
+      return <span className="px-2 py-0.5 text-[11px] font-semibold bg-red-100 text-red-800 rounded-md">✕ Disconnected</span>;
     case 'checking':
-      return <span className="px-2 py-0.5 text-[11px] font-semibold bg-blue-100 text-blue-800 rounded-md animate-pulse">Checking...</span>;
+      return <span className="px-2 py-0.5 text-[11px] font-semibold bg-blue-100 text-blue-800 rounded-md animate-pulse">Connecting...</span>;
     default:
       return <span className="px-2 py-0.5 text-[11px] font-semibold bg-slate-100 text-slate-600 rounded-md">Inactive</span>;
   }

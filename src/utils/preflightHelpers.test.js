@@ -67,6 +67,22 @@ describe('Preflight Helpers', () => {
       expect(result.status).toBe('unavailable');
     });
 
+    it('classifies SecurityError as denied', () => {
+      const err = new Error('Security policy block');
+      err.name = 'SecurityError';
+      const result = evaluateCameraError(err);
+      expect(result.status).toBe('denied');
+      expect(result.message).toContain('document security policy');
+    });
+
+    it('classifies AbortError as hardware unavailable', () => {
+      const err = new Error('Hardware error');
+      err.name = 'AbortError';
+      const result = evaluateCameraError(err);
+      expect(result.status).toBe('unavailable');
+      expect(result.message).toContain('hardware error');
+    });
+
     it('classifies unknown errors with fallback message', () => {
       const err = new Error('Custom weird device error');
       err.name = 'CustomDeviceError';
@@ -134,6 +150,12 @@ describe('Preflight Helpers', () => {
 
     it('returns ready: true when all requirements are satisfied', () => {
       const result = canStartExam(validParams);
+      expect(result.ready).toBe(true);
+      expect(result.missingRequirements).toHaveLength(0);
+    });
+
+    it('accepts cameraStatus active as ready', () => {
+      const result = canStartExam({ ...validParams, cameraStatus: 'active' });
       expect(result.ready).toBe(true);
       expect(result.missingRequirements).toHaveLength(0);
     });

@@ -86,6 +86,22 @@ export function evaluateCameraError(error) {
     };
   }
 
+  if (name === 'SecurityError') {
+    return {
+      status: 'denied',
+      message: 'Camera access is restricted by document security policy or frame configuration.',
+      remedy: 'Please launch the app in a standard trusted window.',
+    };
+  }
+
+  if (name === 'AbortError') {
+    return {
+      status: 'unavailable',
+      message: 'A hardware error occurred while accessing the webcam.',
+      remedy: 'Please disconnect and reconnect your camera, then click "Retry Access".',
+    };
+  }
+
   return {
     status: 'denied',
     message: error.message || 'Unable to open camera stream.',
@@ -166,7 +182,7 @@ export function canStartExam({
     missing.push('Student ID / URN is required');
   }
 
-  if (cameraStatus !== 'granted') {
+  if (cameraStatus !== 'granted' && cameraStatus !== 'active') {
     missing.push('Camera availability and permission check must be passed');
   }
 

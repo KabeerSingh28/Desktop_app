@@ -31,7 +31,29 @@
 'use strict';
 
 const { contextBridge, ipcRenderer } = require('electron');
-const { CHANNELS } = require('./ipc-helpers.cjs');
+// Channel registry constants inlined to ensure preload can load in sandboxed renderers
+// without requiring relative filesystem modules inside ASAR archives.
+const CHANNELS = Object.freeze({
+  APP_GET_STATUS:             'athena:app:get-status',
+  WINDOW_ENTER_FULLSCREEN:    'athena:window:enter-fullscreen',
+  WINDOW_EXIT_FULLSCREEN:     'athena:window:exit-fullscreen',
+  WINDOW_GET_STATE:           'athena:window:get-state',
+  WINDOW_SET_KIOSK:           'athena:window:set-kiosk',
+  WINDOW_STATE_CHANGED:       'athena:window:state-changed',
+  WINDOW_RESTORE_NORMAL:      'athena:window:restore-normal',
+  EXAM_SHOW_RULES:            'athena:exam:show-rules',
+  EXAM_START_SESSION:         'athena:exam:start-session',
+  EXAM_GET_REMAINING_TIME:    'athena:exam:get-remaining-time',
+  EXAM_SUBMIT_SESSION:        'athena:exam:submit-session',
+  EXAM_CANCEL_SESSION:        'athena:exam:cancel-session',
+  EVIDENCE_SAVE_SNAPSHOT:     'athena:evidence:save-snapshot',
+  EVIDENCE_SAVE_VIDEO_CHUNK:  'athena:evidence:save-video-chunk',
+  EVIDENCE_GET_STATUS:        'athena:evidence:get-status',
+  EVIDENCE_CLEANUP:           'athena:evidence:cleanup',
+  PROCTOR_RECORD_EVENT:       'athena:proctor:record-event',
+  PROCTOR_GET_EVENTS:         'athena:proctor:get-events',
+  PROCTOR_EVENT_RECORDED:     'athena:proctor:event-recorded',
+});
 
 
 // ---------------------------------------------------------------------------
